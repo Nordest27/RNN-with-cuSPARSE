@@ -1,0 +1,184 @@
+#include "kernel.cuh"
+
+enum activation_function {
+	RELU, SIGMOID, LINEAL, SOFTMAX
+};
+
+class RNN
+{
+    public:
+    
+	int max_iters;
+	int max_depth;
+	int delay_iters;
+	int batch;
+	double learning_rate;
+	double bias_learning_rate;
+
+	double beta1 = 0.9, beta2 = 0.999;
+	double powBeta1 = 0.9, powBeta2 = 0.999;
+	double eps = 1e-8;
+	bool adam = false;
+
+	int ini;
+	int out;
+	int nodes;
+
+	std::vector<double> current_values;
+	std::vector<activation_function> act_f;
+
+	std::vector<double> biases;
+	std::vector<double> biases_update;
+
+	COO_matrix weights;
+	std::vector<double> weights_update;
+
+	std::vector<std::vector<double>> values_through_time;
+	std::vector<std::vector<double>> dx_through_time;
+	std::vector<double> current_dx;
+
+	private:
+	//////////////////////////DEVICE////////////////////////////
+
+	bool dev_ini = false;
+	
+	// Weights and input/output vectors 
+	int* dA_rows, * dA_columns;
+	double* dA_values, * dX, * dY;
+
+	//biases
+	double* d_biases;
+
+	// Weights and biases update
+	double* d_weights_update;
+	double* d_biases_update;
+
+	// Gradient
+	double* d_gradient;
+	double* d_dx;
+
+	// Adam
+	double* d_m;
+	double* d_v;
+	double* d_m_corr;
+	double* d_v_corr;
+
+	// Input
+	double* d_input;
+
+	// Activation functions
+	int* d_act_f;
+
+	// CUSPARSE APIs
+	cusparseHandle_t  *handle;
+	cusparseSpMatDescr_t matA;
+	cusparseDnVecDescr_t vecX, vecY, gradX;
+	void* dBuffer = NULL;
+	size_t               bufferSize = 0;
+
+	double alpha = 1.0f;
+	double beta = 0.0f;
+	int block_size = 1024;
+
+	int get_blocks(int size);
+
+	int get_threads(int size, int blocks);
+
+	void initialize_device();
+
+	void copy_weights_to_device();
+
+	void copy_vect_to_device(std::vector<double>& values, double* device_vect, int size);
+
+	void copy_vect_to_device(std::vector<activation_function>& values, int* device_vect, int size);
+
+	void execute_matrix_vector_prod(cusparseOperation_t transpose, cusparseDnVecDescr_t vect, cusparseDnVecDescr_t output);
+	
+	void execute_add_biases();
+
+	void execute_add_input_values(std::vector<double>& input_values);
+	
+	void execute_update_gradient();
+
+	void execute_sub_biases_update();
+
+	void execute_sub_weights_update();
+
+	void execute_update_weights_and_biases();
+
+	void execute_update_weights_and_biases_Adam();
+
+	void execute_use_activation_functions();
+
+	void read_weights_of_device();
+
+	void read_vect_of_device(std::vector<double>& result, double* device_vect, int size);
+
+	void move_vect_of_device(double* device_vect1, double* device_vect2, int size);
+
+	void reset_vect(double* device_vect, int size);
+
+    ////////////////////////////////////////////////////////////
+
+    public:
+	
+	void read_weights_and_biases_from_device(std::vector<double>& weights, std::vector<double>& biases);
+
+	void initialize_device_public();
+
+	void empty_device();
+
+	RNN();
+
+	RNN(int i, int o, int n, double lr, int m_d, int bat,  std::vector<activation_function> &a_f, COO_matrix &w, cusparseHandle_t& hand);
+
+	~RNN();
+
+	void add_connection(int node_i, int node_j, double value);
+
+	void connect_like_mlp(int layers);
+
+	void reset();
+
+	void use_activation_functions();
+
+	void forward_prop();
+
+	double backward_prop(std::vector<double> &correct_values, bool classif);
+
+	void set_input_values(std::vector<double>& input_values);
+
+	void softmax(std::vector<double>& values, int ini, int fi);
+
+	double train_step(std::vector<double> &input_values, std::vector<double> &correct_values, bool classif);
+
+	double train_step_one_inp_set(std::vector<double>& input_values, std::vector<double>& correct_values, bool classif);
+
+	double time_sens_train_step(std::vector< std::vector<double>>& input_values, std::vector< std::vector<double>>& correct_values, bool classif);
+
+	void update_weights_and_biases();
+
+	void print_matrix();
+
+	void print_rnn_to_file();
+
+
+};
+
+void RNN_xor_problem();
+
+void RNN_mnist_problem();
+
+void RNN_mnist_problem(RNN& rnn, int examples, int iters, bool test);
+
+void RNN_mnist_autoencode_problem();
+
+void RNN_previous_sign_problem();
+
+void RNN_sum_vect_problem();
+
+void RNN_shakespeare_problem();
+
+void RNN_delayed_str_problem();
+
+void RNN_caltech101_sil_problem(RNN& rnn, int exampl, int iters, bool test, std::vector<std::vector<int>> inp, std::vector<int> sol_list, std::vector<std::vector<int>> test_inp, std::vector<int> test_sol_list);
