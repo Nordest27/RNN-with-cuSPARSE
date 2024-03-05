@@ -30,6 +30,8 @@ RNN::RNN(int i, int o, int n, double lr, int m_d, int bat, std::vector<activatio
 
 	values_through_time = std::vector<std::vector<double>>();
 	dx_through_time = std::vector<std::vector<double>>();
+
+	mask = std::vector<int>(nodes, 0);
 }
 
 RNN::~RNN(){
@@ -80,6 +82,9 @@ void RNN::initialize_device()
 	// Input
 	cudaMalloc((void**)&d_input, nodes * sizeof(double));
 
+	// Mask
+	cudaMalloc((void**)&d_mask, nodes * sizeof(int));
+
 	//Activation functions
 	cudaMalloc((void**)&d_act_f, nodes * sizeof(int));
 
@@ -116,6 +121,21 @@ void RNN::copy_weights_to_device()
 	cudaMemcpy(dA_values, weights.cooValues.data(), weights.nnz * sizeof(double),
 		cudaMemcpyHostToDevice);
 }
+
+void RNN::copy_weights_and_biases_to_device()
+{
+	if (weights.nnz == 0) return;
+	cudaMemcpy(dA_rows, weights.cooRowInd.data(), weights.nnz * sizeof(int),
+		cudaMemcpyHostToDevice);
+	cudaMemcpy(dA_columns, weights.cooColInd.data(), weights.nnz * sizeof(int),
+		cudaMemcpyHostToDevice);
+	cudaMemcpy(dA_values, weights.cooValues.data(), weights.nnz * sizeof(double),
+		cudaMemcpyHostToDevice);
+	 
+	cudaMemcpy(d_biases, biases.data(), nodes * sizeof(double),
+		cudaMemcpyHostToDevice);
+}
+
 
 void RNN::execute_matrix_vector_prod( cusparseOperation_t transpose , cusparseDnVecDescr_t vect, cusparseDnVecDescr_t output)
 {
@@ -197,7 +217,7 @@ void RNN::execute_add_biases()
 
 }
 
-void RNN::execute_add_input_values(std::vector<double>& input_values)
+void RNN::execute_add_input_values(std::vector<double> input_values)
 {
 	int size = input_values.size();
 
@@ -282,7 +302,14 @@ void RNN::execute_use_activation_functions()
 	if (size == 0) return;
 	int blocks = get_blocks(size);
 	int threads = get_threads(blocks, size);
-	useActKernel<<< blocks, threads >>>(dX, d_dx, d_act_f, size);
+	if (training) {
+		for (int i = ini+out; i < nodes; ++i)
+			mask[i] = int(double(rand() % 1000) / 1000 < inp_dropout);
+		copy_vect_to_device(mask, d_mask, nodes);
+	}
+	
+		
+	useActKernel << < blocks, threads >> > (dX, d_dx, d_act_f, size, d_mask);
 	cudaDeviceSynchronize();
 	cudaError_t cudaStatus = cudaGetLastError();
 	if (cudaStatus != cudaSuccess) {
@@ -305,6 +332,14 @@ void RNN::copy_vect_to_device(std::vector<activation_function>& values, int* dev
 		cudaMemcpyHostToDevice);
 }
 
+void RNN::copy_vect_to_device(std::vector<int>& values, int* device_vect, int size)
+{
+	if (size == 0) return;
+	cudaMemcpy(device_vect, values.data(), size * sizeof(int),
+		cudaMemcpyHostToDevice);
+}
+
+
 void RNN::move_vect_of_device(double* device_vect1, double* device_vect2, int size)
 {
 	if (size == 0) return;
@@ -318,6 +353,20 @@ void RNN::reset_vect(double* device_vect, int size)
 	int blocks = get_blocks(size);
 	int threads = get_threads(blocks, size);
 	resetVectKernel<<<blocks, threads>>>(device_vect, size);
+	cudaDeviceSynchronize();
+	cudaError_t cudaStatus = cudaGetLastError();
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "Reset vect launch failed: %s\n", cudaGetErrorString(cudaStatus));
+	}
+
+}
+
+void RNN::reset_vect(int* device_vect, int size)
+{
+	if (size == 0) return;
+	int blocks = get_blocks(size);
+	int threads = get_threads(blocks, size);
+	resetVectKernel << <blocks, threads >> > (device_vect, size);
 	cudaDeviceSynchronize();
 	cudaError_t cudaStatus = cudaGetLastError();
 	if (cudaStatus != cudaSuccess) {
@@ -349,6 +398,7 @@ void RNN::empty_device()
 	cudaFree(d_biases_update);
 	cudaFree(d_gradient);
 	cudaFree(d_input);
+	cudaFree(d_mask);
 	cudaFree(d_act_f);
 	cudaFree(d_dx);
 }
@@ -388,10 +438,43 @@ void RNN::read_weights_and_biases_from_device(std::vector<double>& weights_, std
 }
 ////////////////////////////////////////////////////////////
 
+void RNN::copy_wb_to_dev()
+{
+	copy_weights_and_biases_to_device();
+}
 void RNN::add_connection(int node_i, int node_j, double value)
 {
 	weights.insert_elm(node_i, node_j, value);
 	nodes++;
+}
+
+void RNN::full_reset()
+{
+	current_values = std::vector<double>(nodes, 0);
+	current_dx = std::vector<double>(nodes, 0);
+
+	values_through_time = std::vector<std::vector<double>>();
+	dx_through_time = std::vector<std::vector<double>>();
+
+	biases_update = std::vector<double>(nodes, 0);
+	weights_update = std::vector<double>(weights.nnz, 0);
+
+	reset_vect(dX, nodes);
+	reset_vect(dY, nodes);
+	reset_vect(d_biases_update, nodes);
+	reset_vect(d_weights_update, weights.nnz);
+	reset_vect(d_m, weights.nnz);
+	reset_vect(d_v, weights.nnz);
+	reset_vect(d_m_corr, weights.nnz);
+	reset_vect(d_v_corr, weights.nnz);
+	reset_vect(d_gradient, nodes);
+	reset_vect(d_input, nodes);
+	reset_vect(d_dx, nodes);
+	reset_vect(d_mask, nodes);
+
+	powBeta1 = 0.9;
+	powBeta2 = 0.999;
+
 }
 
 void RNN::reset()
@@ -402,14 +485,13 @@ void RNN::reset()
 	values_through_time = std::vector<std::vector<double>>();
 	dx_through_time = std::vector<std::vector<double>>();
 	reset_vect(dX, nodes);
+	reset_vect(d_mask, nodes);
 
 }
-
 void RNN::use_activation_functions()
 {
 	execute_use_activation_functions();
 
-	
 	read_vect_of_device(current_values,            dX, nodes);
 	read_vect_of_device(current_dx,              d_dx, nodes);
 
@@ -489,6 +571,7 @@ double RNN::backward_prop(std::vector<double> &correct_vals, bool classif)
 		//MSE-gradient
 		else */
 		error[i] = values[ini + i] - correct_vals[i];
+		//std::cout << error[i] << std::endl;
 
 		gradient[ini + i] = error[i];
 		error[i] = abs(error[i]);		
@@ -558,9 +641,298 @@ void RNN::set_input_values(std::vector<double>& input_values)
 	execute_add_input_values(input_values);
 }
 
+//synflow///////////////////////////////////////////////////////////////////////////
+std::vector<double> RNN::synflow_cycle( bool classif, std::vector<double> &ones, int wich )
+{
+	training = true;
+	read_weights_of_device();
+
+	auto ant_weights = weights.cooValues;
+
+	for (int i = 0; i < weights.nnz; ++i)
+		weights.cooValues[i] = abs(weights.cooValues[i]);
+
+	copy_weights_to_device();
+
+	double error = 0;
+	//set_input_values(ones);
+	for (int i = 0; i < max_iters; ++i)
+	{
+		set_input_values(ones);
+		//for (int i = 0; i < ones.size(); ++i)
+			//ones[i] /= 10;
+
+		forward_prop();
+	}
+
+	if (classif)
+		softmax(values_through_time[values_through_time.size() - 1], ini, ini + out);
+
+	double sum_val = sum(values_through_time[values_through_time.size() - 1]);
+	std::vector<double> correct_values(out, sum_val);
+	if (wich != -1)
+		for (int i = 0; i < out; ++i)
+			if (wich != i) 
+				correct_values[i] = values_through_time[values_through_time.size() - 1][ini + wich];
+			else correct_values[i] = sum_val;
+	else 
+		for(int i = 0; i < out; ++i)
+		correct_values[i] += values_through_time[values_through_time.size() - 1][ini + wich];
+
+
+	backward_prop(correct_values, classif);
+	
+	read_vect_of_device(weights_update, d_weights_update, weights.nnz);
+
+	for(int i = 0; i < weights.nnz; ++i)
+		weights.cooValues[i] = abs(weights_update[i]*weights.cooValues[i]);
+
+	auto ret = weights.cooValues;
+	weights.cooValues = ant_weights;
+	copy_weights_to_device();
+	full_reset();
+	training = false;
+
+	return ret;
+}
+
+std::vector<double> RNN::synflow_cycle(bool classif, std::vector<std::pair<std::vector<double>, double>>& dataset, int samples)
+{
+	training = true;
+	read_weights_of_device();
+
+	auto ant_weights = weights.cooValues;
+
+	for (int i = 0; i < weights.nnz; ++i)
+		weights.cooValues[i] = abs(weights.cooValues[i]);
+
+	copy_weights_to_device();
+
+	double error = 0;
+	for (int i = 0; i < out; ++i) {
+		int index;
+		std::vector<double> inp(ini, 0);
+
+		for (int j = 0; j < samples; ++j)
+		{
+			index = rand() % dataset.size();
+			while (int(dataset[index].second) != i)
+				index = rand() % dataset.size();
+
+			auto aux_inp = dataset[index].first;
+
+			for (int j = 0; j < ini; ++j)
+				inp[j] += aux_inp[j] / samples;
+		}
+
+		double suma = 0;
+		for (int j = 0; j < inp.size(); j++)
+			suma += inp[j];
+		suma /= inp.size();
+
+		for (int j = 0; j < inp.size(); j++)
+			inp[j] /= suma;
+
+		/*double max = 0;
+		for (int j = 0; j < inp.size(); j++) {
+			if (inp[j] > max)
+				max = inp[j];
+		}
+
+		//for (int j = 0; j < ones.size(); j++)
+			//ones[j] = 1;
+
+		std::cout << "max: " << max << " suma: " << suma << std::endl;
+		for (int j = 0; j < 28; j++) {
+			for (int u = 0; u < 28; u++) {
+				if (inp[j * 28 + u] > max * 0.75) std::cout << "X ";
+				else if (inp[j * 28 + u] > max * 0.5) std::cout << "x ";
+				else if (inp[j * 28 + u] > max * 0.25) std::cout << "+ ";
+				else if (inp[j * 28 + u] > max * 0) std::cout << "- ";
+				else std::cout << "_ ";
+			}
+			std::cout << std::endl;
+		}
+		std::cout << std::endl;
+        */
+		for (int i = 0; i < max_iters; ++i)
+		{
+			set_input_values(inp);
+			forward_prop();
+		}
+		if (classif)
+			softmax(values_through_time[values_through_time.size() - 1], ini, ini + out);
+
+		double sum_val = sum(values_through_time[values_through_time.size() - 1]);
+		std::vector<double> correct_values(out, sum_val);
+		for (int j = 0; j < out; ++j)
+			if (j != i)
+				correct_values[j] = values_through_time[values_through_time.size() - 1][ini + j];
+			else correct_values[j] = values_through_time[values_through_time.size() - 1][ ini + j ]+sum_val;
+
+		backward_prop(correct_values, classif);
+		reset();
+	}
+	
+	read_vect_of_device(weights_update, d_weights_update, weights.nnz);
+
+	for (int i = 0; i < weights.nnz; ++i)
+		weights.cooValues[i] *= weights_update[i] / out;
+
+
+	auto ret = weights.cooValues;
+	weights.cooValues = ant_weights;
+	copy_weights_to_device();
+	full_reset();
+	training = false;
+	return ret;
+}
+//////////////////////////////////////////////////////////////////////////////////
+
+void RNN::partition(std::vector<std::vector<double>>& inp, std::vector<double>& sol_list, double train_val_part, double val_test_part,
+	std::vector < std::pair<std::vector<double>, double> >& dataset, std::vector < std::pair<std::vector<double>, double> >&  test_data,
+	std::vector < std::pair<std::vector<double>, double> >& val_data, double div, bool shuffle) {
+
+	srand(time(0));
+
+	for (int i = 0; i < inp.size(); i++) {
+		std::vector<double> in(inp[i].size());
+		for (int j = 0; j < inp[i].size(); ++j)
+			in[j] = double(inp[i][j]) / div;
+		dataset.push_back(std::pair<std::vector<double>, double>(in, sol_list[i]));
+	}
+
+	if(shuffle)
+		std::random_shuffle(dataset.begin(), dataset.end());
+
+	test_data = std::vector< std::pair<std::vector<double>, double> >(dataset.begin() + dataset.size() * train_val_part, dataset.end());
+
+	dataset.resize(dataset.size() * train_val_part);
+
+	val_data = std::vector < std::pair<std::vector<double>, double> >(test_data.begin() + test_data.size() * val_test_part, test_data.end());
+
+	test_data.resize(test_data.size() * val_test_part);
+}
+
+void RNN::partition(std::vector<std::vector<int>>& inp, std::vector<int>& sol_list, double train_val_part, double val_test_part,
+	std::vector < std::pair<std::vector<double>, double> >& dataset, std::vector < std::pair<std::vector<double>, double> >& test_data,
+	std::vector < std::pair<std::vector<double>, double> >& val_data, double div, bool shuffle) {
+
+	srand(time(0));
+
+	for (int i = 0; i < inp.size(); i++) {
+		std::vector<double> in(inp[i].size());
+		for (int j = 0; j < inp[i].size(); ++j)
+			in[j] = double(inp[i][j])/div;
+		dataset.push_back(std::pair<std::vector<double>, double>(in, sol_list[i]));
+	}
+
+	if (shuffle)
+		std::random_shuffle(dataset.begin(), dataset.end());
+
+	test_data = std::vector< std::pair<std::vector<double>, double> >(dataset.begin() + dataset.size() * train_val_part, dataset.end());
+
+	dataset.resize(dataset.size() * train_val_part);
+
+	val_data = std::vector < std::pair<std::vector<double>, double> >(test_data.begin() + test_data.size() * val_test_part, test_data.end());
+
+	test_data.resize(test_data.size() * val_test_part);
+}
+
+
+void RNN::partition(std::vector<std::vector<uint8_t>>& inp, std::vector<uint8_t>& sol_list, double train_val_part, double val_test_part,
+	std::vector < std::pair<std::vector<double>, double> >& dataset, std::vector < std::pair<std::vector<double>, double> >& test_data,
+	std::vector < std::pair<std::vector<double>, double> >& val_data, double div, bool shuffle) {
+
+	srand(time(0));
+
+	for (int i = 0; i < inp.size(); i++) {
+		std::vector<double> in(inp[i].size());
+		for (int j = 0; j < inp[i].size(); ++j)
+			in[j] = double(inp[i][j]) / div;
+		dataset.push_back(std::pair<std::vector<double>, double>(in, sol_list[i]));
+	}
+
+	if (shuffle)
+		std::random_shuffle(dataset.begin(), dataset.end());
+
+	test_data = std::vector< std::pair<std::vector<double>, double> >(dataset.begin() + dataset.size() * train_val_part, dataset.end());
+
+	dataset.resize(dataset.size() * train_val_part);
+
+	val_data = std::vector < std::pair<std::vector<double>, double> >(test_data.begin() + test_data.size() * val_test_part, test_data.end());
+
+	test_data.resize(test_data.size() * val_test_part);
+}
+
+double RNN::forward_prop_cycle(std::vector<double>& input_values, std::vector<double>& correct_values, bool classif)
+{
+	double error = 0;
+	for (int i = 0; i < max_iters; ++i)
+	{
+		set_input_values(input_values);
+		forward_prop();
+	}
+
+	if (classif)
+		softmax(values_through_time[values_through_time.size() - 1], ini, ini + out);
+
+	error = get_error(correct_values, classif);
+	return error;
+}
+double RNN::forward_prop_one_inp_cycle(std::vector<double>& input_values, std::vector<double>& correct_values, bool classif)
+{
+	double error = 0;
+
+	set_input_values(input_values);
+	for (int i = 0; i < max_iters; ++i)
+	{
+		forward_prop();
+	}
+
+	if (classif)
+		softmax(values_through_time[values_through_time.size() - 1], ini, ini + out);
+
+	error = get_error(correct_values, classif);
+	return error;
+}
+
+double RNN::get_error(std::vector<double>& correct_values, bool classif)
+{
+	auto layer = values_through_time.size() - 1;
+
+	auto values = values_through_time[layer];
+
+	std::vector<double> error(out, 0);
+	std::vector<double> gradient(nodes, 0);
+
+	int max_i = 0;
+	double max_val = values[max_i];
+
+	for (int i = 0; i < out; ++i) {
+		if (values[ini + i] > max_val) {
+			max_val = values[ini + i];
+			max_i = i;
+		}
+		//Cross Entropy-gradient
+		/*if (classif) error[i] = (values[ini + i] - correct_vals[i]) / ((values[ini + i] * (1 - values[ini + i])));
+		//MSE-gradient
+		else */
+		error[i] = abs(values[ini + i] - correct_values[i]);
+		/*if (correct_vals[i] == 1)
+		{
+			std::cout << values[ini + i] << " " << i << std::endl;
+		}*/
+	}
+
+	if (classif && !std::isnan(mean(error))) return (double)(correct_values[max_i] != 1);
+	else return mean(error);
+}
+
 double RNN::train_step(std::vector<double> &input_values, std::vector<double> &correct_values, bool classif)
 {
 	double error = 0;
+	training = true;
 	for (int i = 0; i < max_iters; ++i)
 	{
 		set_input_values(input_values);
@@ -570,12 +942,14 @@ double RNN::train_step(std::vector<double> &input_values, std::vector<double> &c
 		softmax(values_through_time[values_through_time.size()-1], ini, ini+out);
 
 	error = backward_prop(correct_values, classif);
+	training = false;
 	return error;
 }
 
 double RNN::train_step_one_inp_set(std::vector<double>& input_values, std::vector<double>& correct_values, bool classif)
 {
 	double error = 0;
+	training = true;
 	set_input_values(input_values);
     for (int i = 0; i < max_iters; ++i)
 		forward_prop();
@@ -584,12 +958,14 @@ double RNN::train_step_one_inp_set(std::vector<double>& input_values, std::vecto
 		softmax(values_through_time[values_through_time.size() - 1], ini, ini+out);
 
 	error = backward_prop(correct_values, classif);
+	training = false;
 	return error;
 }
 
 double RNN::time_sens_train_step(std::vector< std::vector<double>>& input_values, std::vector< std::vector<double>>& correct_values, bool classif)
 {
 	double error = 0;
+	training = true;
 	std::string alphabet = "abcdefghijklmopqrstuvwxyz1234567890 ,";
 	int iters = 0;
 	for (int i = 0; i < delay_iters; ++i)
@@ -615,6 +991,7 @@ double RNN::time_sens_train_step(std::vector< std::vector<double>>& input_values
 	for ( auto solution : correct_values )
 		std::cout << alphabet[max_pos(0, alphabet.size(), solution)];
 	std::cout << std::endl << std::endl << std::endl;
+	training = false;
 	return error / input_values.size();
 }
 
@@ -639,7 +1016,7 @@ void RNN::print_matrix()
 
 	printf("-----------weights--------------\n");
 	for (int i = 0; i < weights.nnz; ++i)
-		std::cout<<weights.cooRowInd[i]<<" "<< weights.cooColInd[i]<<" " << weights.cooValues[i] << std::endl;
+		std::cout<<weights.cooColInd[i]<<" "<< weights.cooRowInd[i]<<" " << weights.cooValues[i] << std::endl;
 
 	printf("---------bias_update---------\n");
 	for (int i = 0; i < nodes; ++i)
@@ -647,7 +1024,7 @@ void RNN::print_matrix()
 	std::cout << std::endl;
 	printf("---------weight_update----------\n");
 	for (int i = 0; i < weights_update.size(); ++i)
-    std::cout << weights.cooRowInd[i] <<" "<< weights.cooColInd[i]<<" " << weights_update[i] << std::endl;
+    std::cout << weights.cooColInd[i] <<" "<< weights.cooRowInd[i]<<" " << weights_update[i] << std::endl;
 }
 
 void RNN::print_rnn_to_file()
@@ -805,7 +1182,6 @@ void RNN_mnist_problem()
 	int depth = 5;
 	double learning_rate = 0.01;
 	double error_sum = 0;
-
 	std::vector<activation_function> act_f(nodes, RELU);
 
 	for (int i = ini_nodes; i < ini_nodes + out_nodes; ++i)
@@ -1007,7 +1383,6 @@ void RNN_mnist_problem( RNN& rnn, int exampl, int iters, bool test)
 			//std::cout << "---------------------\n";
 		}
 		//rnn.print_matrix();
-
 		std::cout << "Iteration " << it << ": " << 100*error_sum / examples << std::endl;
 
 		error_sum = 0;
@@ -1518,29 +1893,47 @@ void RNN_delayed_str_problem()     {
 	}
 }
 
-void RNN_caltech101_sil_problem(RNN& rnn, int exampl, int iters, bool test, std::vector<std::vector<int>> inp, std::vector<int> sol_list, std::vector<std::vector<int>> test_inp, std::vector<int> test_sol_list)
+bool RNN_caltech101_sil_problem(RNN& rnn, int exampl, int iters, bool test, std::vector<std::vector<int>> &inp, std::vector<int> &sol_list, 
+																			std::vector<std::vector<int>> &test_inp, std::vector<int> &test_sol_list,
+																			std::vector<std::vector<int>> &val_inp, std::vector<int>  &val_sol_list)
 {
+	srand(time(0));
+	double val_error_sum = 0;
 	double error_sum = 0;
 	int ini_nodes = rnn.ini;
 	int batch = rnn.batch;
 
-	std::vector<int> indices(inp.size(), 0);
-	for (int i = 0; i < inp.size(); ++i)
-		indices[i] = i;
+
 
 	int examples = exampl;
 	if (examples == -1)
 		examples = inp.size();
 
+	int validation_examples = val_inp.size();
+
+	if (examples < 1000) 
+		validation_examples = 0;
+	
+
+	std::vector<int> indices(inp.size(), 0);
+	for (int i = 0; i < inp.size(); ++i)
+		indices[i] = i;
+
+
 	std::vector<double> input(28 * 28);
 	std::vector<double> sol(101);
-	for (int it = 0; it < iters; it++) {
+
+	int it = 0;
+	val_error_sum = validation_examples;
+	error_sum = examples;
+	while (it < iters && ( validation_examples == 0 || val_error_sum/validation_examples <= error_sum/examples*1.1) ) {
+		error_sum = 0;
+		val_error_sum = 0;
 		std::random_shuffle(indices.begin(), indices.end());
 		int print_stop = examples / 10;
 		for (int image = 0; image < examples; ++image)
 		{
 			int image_ind = indices[image];
-
 			//rnn.print_matrix();
 			auto raw_input = inp[image_ind];
 			int i_sol = sol_list[image_ind];
@@ -1568,14 +1961,38 @@ void RNN_caltech101_sil_problem(RNN& rnn, int exampl, int iters, bool test, std:
 		}
 		//rnn.print_matrix();
 
-		std::cout << "Iteration " << it << ": " << 100 * error_sum / examples << std::endl;
 
-		error_sum = 0;
 
+		//Validation
+		if(validation_examples > 0)
+		{
+			for (int image = 0; image < validation_examples; ++image)
+			{
+
+				//rnn.print_matrix();
+				auto raw_input = val_inp[image];
+				int i_sol = val_sol_list[image];
+
+				for (int i = 0; i < raw_input.size(); ++i)
+					input[i] = ((double)raw_input[i]);
+
+				for (int i = 0; i < sol.size(); ++i)
+					sol[i] = 0;
+				sol[i_sol - 1] = 1;
+
+				val_error_sum += rnn.forward_prop_cycle(input, sol, true);
+				rnn.reset();
+				//std::cout << "---------------------\n";
+			}
+		}
+
+		std::cout << "Iteration " << it << ": " << 100 * error_sum / examples << ", Validation: " << 100 * val_error_sum / validation_examples <<std::endl;
+		it++;
 	}
-	if (!test) return;
+	if (!test) return val_error_sum / validation_examples <= error_sum / examples * 1.1;
 	
 	examples = test_inp.size();
+	double test_error_sum = 0;
 
 	int print_stop = examples / 10;
 	for (int image = 0; image < examples; ++image)
@@ -1591,18 +2008,18 @@ void RNN_caltech101_sil_problem(RNN& rnn, int exampl, int iters, bool test, std:
 			sol[i] = 0;
 	    sol[i_sol-1] = 1;
 
-		error_sum += rnn.train_step(input, sol, true);
+		test_error_sum += rnn.forward_prop_cycle(input, sol, true);
 
 		if (examples > 1000 && image > print_stop)
 		{
-			std::cout << "%" << 100 * image / examples << " error = " << 100 * error_sum / image << std::endl;
+			std::cout << "%" << 100 * image / examples << " error = " << 100 * test_error_sum / image << std::endl;
 			print_stop += examples / 10;
 		}
 		rnn.reset();
 		//std::cout << "---------------------\n";
 	}
 	//rnn.print_matrix();
-	std::cout << "Test: " << 100 * error_sum / examples << std::endl;
+	std::cout << "Test: " << 100 * test_error_sum / examples << std::endl;
 
 	for (int image = 0; image < 100; ++image) {
 		for (int j = 0; j < 28; j++) {
@@ -1621,7 +2038,7 @@ void RNN_caltech101_sil_problem(RNN& rnn, int exampl, int iters, bool test, std:
 			input[i] = ((double)raw_input[i]);
 		}
 
-		rnn.train_step(input, sol, true);
+		rnn.forward_prop_cycle(input, sol, true);
 
 		for (int i = 0; i < 101; ++i)
 			if(rnn.values_through_time[rnn.values_through_time.size() - 1][ini_nodes + i] > 0.1)
@@ -1629,6 +2046,395 @@ void RNN_caltech101_sil_problem(RNN& rnn, int exampl, int iters, bool test, std:
 		rnn.reset();
 	}
 	
-	
+	return val_error_sum / validation_examples <= error_sum / examples * 1.1;
 }
 
+
+
+void RNN_chess_problem(RNN& rnn, int exampl, int iters, std::vector<std::vector<double>> &inp, std::vector<double> &sol_list)
+{
+	double error_sum = 0;
+	int ini_nodes = rnn.ini;
+	int batch = rnn.batch;
+	
+	std::vector<int> indices(inp.size(), 0);
+	for (int i = 0; i < inp.size(); ++i)
+		indices[i] = i;
+
+	int examples = exampl;
+	if (examples == -1)
+		examples = inp.size();
+
+	std::vector<double> input(rnn.ini);
+	std::vector<double> sol(rnn.out);
+
+	for (int it = 0; it < iters; it++) {
+		std::random_shuffle(indices.begin(), indices.end());
+		int print_stop = examples / 10;
+		for (int image = 0; image < examples; ++image)
+		{
+			int image_ind = indices[image];
+
+			//rnn.print_matrix();
+			auto raw_input = inp[image_ind];
+
+			for (int i = 0; i < raw_input.size(); ++i)
+				input[i] = ((double)raw_input[i]);
+
+			sol[0] = sol_list[image_ind];
+
+			error_sum += rnn.train_step(input, sol, false);
+			//::cout << "hmmmmm" << std::endl;
+			if (image % batch == 0) {
+				//if (it % 1000 == 0)rnn.print_matrix();
+				rnn.update_weights_and_biases();
+			}
+			if (examples > 1000 && image > print_stop)
+			{
+				std::cout << "%" << 100 * image / examples << " error = " << error_sum / image << std::endl;
+				print_stop += examples / 10;
+			}
+			rnn.reset();
+			//std::cout << "---------------------\n";
+		}
+		//rnn.print_matrix();
+
+		std::cout << "Iteration " << it << ": " << error_sum / examples << std::endl;
+
+		error_sum = 0;
+
+	}
+
+}
+
+
+
+bool generic_classif_RNN_problem(RNN& rnn, int exampl, int iters, bool test,
+	std::vector < std::pair<std::vector<double>, double> >& dataset, std::vector < std::pair<std::vector<double>, double> >& test_data,
+	std::vector < std::pair<std::vector<double>, double> >& val_data) {
+
+	double aux_drop = rnn.inp_dropout;
+	rnn.inp_dropout = 0;
+	double val_error_sum = 0;
+	double error_sum = 0;
+	int ini_nodes = rnn.ini;
+	int batch = rnn.batch;
+
+	int examples = exampl;
+	if (examples == -1)
+		examples = dataset.size();
+
+	int validation_examples = val_data.size();
+	auto best_weights = rnn.weights;
+	auto best_biases = rnn.biases;
+	double best_val_score = validation_examples*100;
+
+	std::vector<int> indices(dataset.size(), 0);
+	for (int i = 0; i < dataset.size(); ++i)
+		indices[i] = i;
+
+
+	std::vector<double> input(rnn.ini);
+	std::vector<double> sol(rnn.out);
+
+	int it = 0;
+	val_error_sum = validation_examples;
+	error_sum = examples;
+	double ant_val_error = val_error_sum;
+	bool first_dip = true;
+	int didnt_do_better = 0;
+	while (it < iters) {
+		error_sum = 0;
+		first_dip = (ant_val_error > val_error_sum);
+		if (val_error_sum < best_val_score) {
+			std::cout << "Better parameters found!" << std::endl;
+			rnn.read_weights_and_biases_from_device(best_weights.cooValues, best_biases);
+			best_val_score = val_error_sum;
+			didnt_do_better = 0;
+		}
+		else didnt_do_better++;
+
+		if (didnt_do_better > 7) break;
+
+		ant_val_error = val_error_sum;
+		val_error_sum = 0;
+		std::random_shuffle(indices.begin(), indices.end());
+		int print_stop = examples / 10;
+		for (int image = 0; image < examples; ++image)
+		{
+			int image_ind = indices[image];
+			//rnn.print_matrix();
+			auto raw_input = dataset[image_ind].first;
+			
+			int i_sol = dataset[image_ind].second;
+
+			for (int i = 0; i < raw_input.size(); ++i)
+				input[i] = ((double)raw_input[i]);
+
+			for (int i = 0; i < sol.size(); ++i)
+				sol[i] = 0;
+			sol[i_sol] = 1;
+			
+
+			error_sum += rnn.train_step(input, sol, true);
+			//::cout << "hmmmmm" << std::endl;
+			if (image % batch == 0) {
+				//if (it % 1000 == 0)rnn.print_matrix();
+				rnn.update_weights_and_biases();
+			}
+			if (examples > 1000 && image > print_stop)
+			{
+				std::cout << "%" << 100 * image / examples << " error = " << 100 * error_sum / image << std::endl;
+				print_stop += examples / 10;
+			}
+			rnn.reset();
+			//std::cout << "---------------------\n";
+		}
+		//rnn.print_matrix();
+
+		//Validation
+		if (validation_examples > 0)
+		{
+			for (int image = 0; image < validation_examples; ++image)
+			{
+
+				//rnn.print_matrix();
+				auto raw_input = val_data[image].first;
+				int i_sol = val_data[image].second;
+
+				for (int i = 0; i < raw_input.size(); ++i)
+					input[i] = ((double)raw_input[i]);
+
+				for (int i = 0; i < sol.size(); ++i)
+					sol[i] = 0;
+				sol[i_sol] = 1;
+
+				val_error_sum += rnn.forward_prop_cycle(input, sol, true);
+				rnn.reset();
+				//std::cout << "---------------------\n";
+			}
+		}
+		rnn.inp_dropout = aux_drop;
+		std::cout << "Iteration " << it << ": " << 100 * error_sum / examples << ", Validation: " << 100 * val_error_sum / validation_examples << std::endl;
+		it++;
+	}
+
+	rnn.weights = best_weights;
+	rnn.biases = best_biases;
+	rnn.copy_wb_to_dev();
+
+	if (!test) return val_error_sum / validation_examples <= error_sum / examples *1.1;
+
+	examples = test_data.size();
+	double test_error_sum = 0;
+
+	int print_stop = examples / 10;
+	for (int image = 0; image < examples; ++image)
+	{
+		//rnn.print_matrix();
+		auto raw_input = test_data[image].first;
+		int i_sol = test_data[image].second;
+
+		for (int i = 0; i < raw_input.size(); ++i)
+			input[i] = ((double)raw_input[i]);
+
+		for (int i = 0; i < sol.size(); ++i)
+			sol[i] = 0;
+		sol[i_sol] = 1;
+
+		test_error_sum += rnn.forward_prop_cycle(input, sol, true);
+
+		if (examples > 1000 && image > print_stop)
+		{
+			std::cout << "%" << 100 * image / examples << " error = " << 100 * test_error_sum / image << std::endl;
+			print_stop += examples / 10;
+		}
+		rnn.reset();
+		//std::cout << "---------------------\n";
+	}
+	//rnn.print_matrix();
+	std::cout << "Test: " << 100 * test_error_sum / examples << std::endl;
+
+	if (rnn.ini == 28 * 28) {
+		int point = rand() % (test_data.size()-10);
+		for (int i = point; i < point+10; ++i){
+			for (int j = 0; j < 28; j++) {
+				for (int u = 0; u < 28; u++) {
+					if (test_data[i].first[j * 28 + u] > 0.75) std::cout << "X ";
+					else if (test_data[i].first[j * 28 + u] > 0.5) std::cout << "x ";
+					else if (test_data[i].first[j * 28 + u] > 0.25) std::cout << "+ ";
+					else if (test_data[i].first[j * 28 + u] > 0) std::cout << "- ";
+					else std::cout << "_ ";
+				}
+				std::cout << std::endl;
+			}
+			std::cout << std::endl;
+
+			auto raw_input = test_data[i].first;
+			std::cout << "solution: " << (int)test_data[i].second << std::endl;
+
+			for (int i = 0; i < raw_input.size(); ++i) {
+				input[i] = ((double)raw_input[i]);
+			}
+
+			rnn.forward_prop_cycle(input, sol, true);
+
+			for (int i = 0; i < rnn.out; ++i)
+				if (rnn.values_through_time[rnn.values_through_time.size() - 1][ini_nodes + i] > 0.1)
+					std::cout << "i: " << i << " value: " << rnn.values_through_time[rnn.values_through_time.size() - 1][ini_nodes + i] << std::endl;
+			rnn.reset();
+		}
+	}
+
+	return val_error_sum / validation_examples <= error_sum / examples * 1.1;
+}
+
+
+
+bool generic_regress_RNN_problem(RNN& rnn, int exampl, int iters, bool test,
+	std::vector < std::pair<std::vector<double>, double> >& dataset, std::vector < std::pair<std::vector<double>, double> >& test_data,
+	std::vector < std::pair<std::vector<double>, double> >& val_data) {
+
+	double aux_drop = rnn.inp_dropout;
+	rnn.inp_dropout = 0;
+	double val_error_sum = 0;
+	double error_sum = 0;
+	int ini_nodes = rnn.ini;
+	int batch = rnn.batch;
+
+	int examples = exampl;
+	if (examples == -1)
+		examples = dataset.size();
+
+	int validation_examples = val_data.size();
+	auto best_weights = rnn.weights;
+	auto best_biases = rnn.biases;
+	double best_val_score = INFINITY;
+
+	std::vector<int> indices(dataset.size(), 0);
+	for (int i = 0; i < dataset.size(); ++i)
+		indices[i] = i;
+
+
+	std::vector<double> input(rnn.ini);
+	std::vector<double> sol(rnn.out);
+
+	int it = 0;
+	val_error_sum = INFINITY;
+	error_sum = examples;
+	double ant_val_error = val_error_sum;
+	bool first_dip = true;
+	int didnt_do_better = 0;
+	double error_sum_print = 0;
+	while (it < iters) {
+		error_sum = 0;
+		error_sum_print = 0;
+		first_dip = (ant_val_error > val_error_sum);
+		if (val_error_sum < best_val_score) {
+			std::cout << "Better parameters found!" << std::endl;
+			rnn.read_weights_and_biases_from_device(best_weights.cooValues, best_biases);
+			best_val_score = val_error_sum;
+			didnt_do_better = 0;
+		}
+		else didnt_do_better++;
+
+		if (didnt_do_better > 1) break;
+
+		ant_val_error = val_error_sum;
+		val_error_sum = 0;
+		std::random_shuffle(indices.begin(), indices.end());
+		int print_stop = examples / 10;
+		for (int image = 0; image < examples; ++image)
+		{
+			int image_ind = indices[image];
+			//rnn.print_matrix();
+			auto raw_input = dataset[image_ind].first;
+
+			sol[0] = dataset[image_ind].second;
+
+			for (int i = 0; i < raw_input.size(); ++i)
+				input[i] = ((double)raw_input[i]);
+
+			double e = rnn.train_step(input, sol, false);
+			error_sum += e;
+			error_sum_print += e;
+
+			//::cout << "hmmmmm" << std::endl;
+			if (image % batch == 0) {
+				//if (it % 1000 == 0)rnn.print_matrix();
+				rnn.update_weights_and_biases();
+			}
+			if (examples > 1000 && image > print_stop)
+			{
+				std::cout <<"%" << double(it - 1) + double(image) / examples << " error = " << error_sum_print / (examples / 100) << std::endl;
+				print_stop += examples / 100;
+				error_sum_print = 0;
+			}
+			rnn.reset();
+			//std::cout << "---------------------\n";
+		}
+		//rnn.print_matrix();
+
+		//Validation
+		if (validation_examples > 0)
+		{
+			for (int image = 0; image < validation_examples; ++image)
+			{
+
+				//rnn.print_matrix();
+				auto raw_input = val_data[image].first;
+
+				for (int i = 0; i < raw_input.size(); ++i)
+					input[i] = ((double)raw_input[i]);
+
+				sol[0] = val_data[image].second;
+
+				val_error_sum += rnn.forward_prop_cycle(input, sol, false);
+				rnn.reset();
+				//std::cout << "---------------------\n";
+			}
+		}
+		rnn.inp_dropout = aux_drop;
+		std::cout << "Iteration " << it << ": " << error_sum / examples << ", Validation: " << val_error_sum / validation_examples << std::endl;
+		it++;
+	}
+
+	rnn.weights = best_weights;
+	rnn.biases = best_biases;
+	rnn.copy_wb_to_dev();
+
+	if (!test) return false;
+
+	examples = test_data.size();
+	double test_error_sum = 0;
+	double test_error_sum_print = 0;
+
+	int print_stop = examples / 10;
+	for (int image = 0; image < examples; ++image)
+	{
+		//rnn.print_matrix();¡
+		auto raw_input = test_data[image].first;
+
+		sol[0] = test_data[image].second;
+
+		for (int i = 0; i < raw_input.size(); ++i)
+			input[i] = ((double)raw_input[i]);
+
+		double  e = rnn.forward_prop_cycle(input, sol, false);
+		test_error_sum += e;
+		test_error_sum_print += e;
+
+		if (examples > 1000 && image > print_stop)
+		{
+			std::cout << "%" << 100*image / examples << " error = " << test_error_sum_print / (examples / 10) << std::endl;
+			print_stop += examples / 10;
+			test_error_sum_print = 0;
+		}
+		rnn.reset();
+		//std::cout << "---------------------\n";
+	}
+	//rnn.print_matrix();
+	std::cout << "Test: " << test_error_sum / examples << std::endl;
+
+	return false;
+}

@@ -1,5 +1,60 @@
+#include "Chess.cuh"
+#include "sqlite3.h"
 
-#include "Prune_evolve.cuh"
+std::vector<std::vector<double>> inp;
+std::vector<double> res;
+
+static int callback(void* data, int argc, char** argv, char** azColName) {
+    int i;
+    //fprintf(stderr, "%s: ", (const char*)data);
+
+    /*for (i = 0; i < argc; i++) {
+      printf("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
+
+    }*/
+
+    inp.push_back(chess_board(argv[1]).board_to_ai_inp());
+    res.push_back(std::stof(argv[3]));
+   // std::cout << inp.size() << " " << res.size() << std::endl;
+    //printf("\n");
+    return 0;
+}
+void chess_problem()
+{
+    sqlite3* db;
+    // Save the connection result
+    int exit = 0;
+    exit = sqlite3_open("D:/test.db", &db);
+
+    char* zErrMsg = 0;
+    const char* data = "Callback function called";
+
+    // Test if there was an error
+    if (exit)
+        std::cout << "DB Open Error: " << sqlite3_errmsg(db) << std::endl;
+    else
+        std::cout << "Opened Database Successfully!" << std::endl;
+
+    /* Create merged SQL statement */
+    auto sql = "SELECT * from evaluations LIMIT 100000";
+
+    /* Execute SQL statement */
+    auto rc = sqlite3_exec(db, sql, callback, (void*)data, &zErrMsg);
+
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", zErrMsg);
+        sqlite3_free(zErrMsg);
+    }
+    else {
+        fprintf(stdout, "Operation done successfully\n");
+    }
+    sqlite3_close(db);
+
+    std::cout << inp.size() << " " << res.size()<<std::endl;
+
+    prune_chess_problem(inp, res);
+
+}
 
 int main()
 {
@@ -29,7 +84,8 @@ int main()
     std::cout << "using " << properties.multiProcessorCount << " multiprocessors" << std::endl;
     std::cout << "max threads per processor: " << properties.maxThreadsPerMultiProcessor << std::endl;
 
-    prune_mnist_problem();
+    prune_caltech_problem();
+    //test_fen();
     //std::ifstream stream("train_caltech101.txt");
 
     cudaStatus = cudaDeviceReset();

@@ -25,6 +25,8 @@
     <ClInclude Include="NEAT.cuh" />
     <ClInclude Include="Prune_evolve.cuh" />
     <ClInclude Include="Chess.cuh" />
+    <ClInclude Include="sqlite3.h" />
+    <ClInclude Include="sqlite3ext.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="MNIST_reader">
@@ -50,5 +52,9 @@
     <Text Include="..\..\..\..\Escritorio\LoopyNN\Caltech py\test_labels_caltech101.txt" />
     <Text Include="..\..\..\..\Escritorio\LoopyNN\Caltech py\train_caltech101.txt" />
     <Text Include="..\..\..\..\Escritorio\LoopyNN\Caltech py\train_labels_caltech101.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="shell.c" />
+    <ClCompile Include="sqlite3.c" />
   </ItemGroup>
 </Project>

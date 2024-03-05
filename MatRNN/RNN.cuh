@@ -19,12 +19,16 @@ class RNN
 	double powBeta1 = 0.9, powBeta2 = 0.999;
 	double eps = 1e-8;
 	bool adam = false;
+	bool training = true;
+	double inp_dropout = 0;
 
 	int ini;
 	int out;
 	int nodes;
 
 	std::vector<double> current_values;
+
+	std::vector<int> mask;
 	std::vector<activation_function> act_f;
 
 	std::vector<double> biases;
@@ -46,6 +50,7 @@ class RNN
 	int* dA_rows, * dA_columns;
 	double* dA_values, * dX, * dY;
 
+
 	//biases
 	double* d_biases;
 
@@ -65,6 +70,9 @@ class RNN
 
 	// Input
 	double* d_input;
+
+	// Mask
+	int* d_mask;
 
 	// Activation functions
 	int* d_act_f;
@@ -88,15 +96,19 @@ class RNN
 
 	void copy_weights_to_device();
 
+	void copy_weights_and_biases_to_device();
+
 	void copy_vect_to_device(std::vector<double>& values, double* device_vect, int size);
 
 	void copy_vect_to_device(std::vector<activation_function>& values, int* device_vect, int size);
+
+	void copy_vect_to_device(std::vector<int>& values, int* device_vect, int size);
 
 	void execute_matrix_vector_prod(cusparseOperation_t transpose, cusparseDnVecDescr_t vect, cusparseDnVecDescr_t output);
 	
 	void execute_add_biases();
 
-	void execute_add_input_values(std::vector<double>& input_values);
+	void execute_add_input_values(std::vector<double> input_values);
 	
 	void execute_update_gradient();
 
@@ -117,6 +129,8 @@ class RNN
 	void move_vect_of_device(double* device_vect1, double* device_vect2, int size);
 
 	void reset_vect(double* device_vect, int size);
+
+	void reset_vect(int* device_vect, int size);
 
     ////////////////////////////////////////////////////////////
 
@@ -140,9 +154,36 @@ class RNN
 
 	void reset();
 
+	void full_reset();
+
 	void use_activation_functions();
 
 	void forward_prop();
+
+	//synflow
+	std::vector<double> synflow_cycle(bool classif, std::vector<double> &ones, int wich);
+	std::vector<double> synflow_cycle(bool classif, std::vector<std::pair<std::vector<double>, double>>& dataset, int samples);
+	//
+
+	void partition(std::vector<std::vector<double>>& inp, std::vector<double>& sol_list, double train_val_part, double val_test_part,
+				   std::vector < std::pair<std::vector<double>, double> >&     dataset, std::vector < std::pair<std::vector<double>, double> >  &test_data,
+				   std::vector < std::pair<std::vector<double>, double> >&     val_data, double div, bool shuffle);
+
+	void partition(std::vector<std::vector<int>>& inp, std::vector<int>& sol_list, double train_val_part, double val_test_part,
+		std::vector < std::pair<std::vector<double>, double> >& dataset, std::vector < std::pair<std::vector<double>, double> >& test_data,
+		std::vector < std::pair<std::vector<double>, double> >& val_data, double div, bool shuffle);
+
+	void partition(std::vector<std::vector<uint8_t>>& inp, std::vector<uint8_t>& sol_list, double train_val_part, double val_test_part,
+		std::vector < std::pair<std::vector<double>, double> >& dataset, std::vector < std::pair<std::vector<double>, double> >& test_data,
+		std::vector < std::pair<std::vector<double>, double> >& val_data, double div, bool shuffle);
+
+	void copy_wb_to_dev();
+
+	double forward_prop_cycle(std::vector<double>& input_values, std::vector<double>& correct_values, bool classif);
+
+	double forward_prop_one_inp_cycle(std::vector<double>& input_values, std::vector<double>& correct_values, bool classif);
+
+	double get_error(std::vector<double>& correct_values, bool classif);
 
 	double backward_prop(std::vector<double> &correct_values, bool classif);
 
@@ -181,4 +222,16 @@ void RNN_shakespeare_problem();
 
 void RNN_delayed_str_problem();
 
-void RNN_caltech101_sil_problem(RNN& rnn, int exampl, int iters, bool test, std::vector<std::vector<int>> inp, std::vector<int> sol_list, std::vector<std::vector<int>> test_inp, std::vector<int> test_sol_list);
+bool RNN_caltech101_sil_problem(RNN& rnn, int exampl, int iters, bool test, std::vector<std::vector<int>>& inp, std::vector<int>& sol_list,
+																			std::vector<std::vector<int>>& test_inp, std::vector<int>& test_sol_list,
+																			std::vector<std::vector<int>>& val_inp, std::vector<int>& val_sol_list);
+
+void RNN_chess_problem(RNN& rnn, int exampl, int iters, std::vector<std::vector<double>> &inp, std::vector<double> &sol_list);
+
+bool generic_classif_RNN_problem(RNN& rnn, int exampl, int iters, bool test,
+	std::vector < std::pair<std::vector<double>, double> >& dataset, std::vector < std::pair<std::vector<double>, double> >& test_data,
+	std::vector < std::pair<std::vector<double>, double> >& val_data);
+
+bool generic_regress_RNN_problem(RNN& rnn, int exampl, int iters, bool test,
+	std::vector < std::pair<std::vector<double>, double> >& dataset, std::vector < std::pair<std::vector<double>, double> >& test_data,
+	std::vector < std::pair<std::vector<double>, double> >& val_data);
