@@ -59,6 +59,16 @@ __global__ void resetVectKernel(double* a, int size)
     a[id] = 0;
 }
 
+__global__ void resetVectKernel(int* a, int size)
+{
+    // Get our global thread ID
+    int id = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (id >= size) return;
+
+    a[id] = 0;
+}
+
 __global__ void copyVectorKernel(double* a, double* b, int size)
 {
     // Get our global thread ID
@@ -69,13 +79,19 @@ __global__ void copyVectorKernel(double* a, double* b, int size)
     a[id] = b[id];
 }
 
-__global__ void useActKernel(double* values, double* dx, int* act_f, int size)
+__global__ void useActKernel(double* values, double* dx, int* act_f, int size, int* mask)
 {
     // Get our global thread ID
     int id = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (id >= size) return;
 
+    if (mask[id] == 1)
+    {
+        dx[id] = 0;
+        values[id] = 0;
+        return;
+    }
     int aux_act_f = act_f[id];
     dx[id] = 0;
     //RELU 0, SIGMOID 1, LINEAL 2
@@ -91,6 +107,7 @@ __global__ void useActKernel(double* values, double* dx, int* act_f, int size)
         else dx[id] = 1;
     }
     else if (aux_act_f == 2) dx[id] = 1;
+
 }
 
 __global__ void TmultVectsKernel(double* values, int* cooRow, int* cooCol, double* a, double c, double* b, int size)
@@ -114,6 +131,125 @@ COO_matrix::COO_matrix()
     cooRowInd = std::vector<int>();
     cooColInd = std::vector<int>();
     cooValues = std::vector<double>();
+}
+
+void COO_matrix::connect_layers(int ini1, int end1, int ini2, int end2, double sparsity, int nodes)
+{
+    /*int posi = 0;
+
+    while (posi < nnz && cooRowInd[posi] < ini2 && cooColInd[posi] < ini1)
+        posi++;
+    
+   for (int nj = ini2; nj < end2; nj++)
+        for (int ni = ini1; ni < end1; ni++)
+        {
+            if (double(rand() % 1000) / 1000 < sparsity) {
+                if (posi < nnz && cooRowInd[posi] == nj && cooColInd[posi] == ni)
+                    posi++;
+                continue;
+            }
+            if ( posi < nnz && cooRowInd[posi] == nj && cooColInd[posi] == ni)
+            {
+                posi++;
+               // std::cout << posi << " "<< cooRowInd[posi] <<" "<<cooColInd[posi]<<std::endl;
+                continue;
+            }
+
+
+            cooRowInd.insert(cooRowInd.begin() + posi, nj);
+            cooColInd.insert(cooColInd.begin() + posi, ni);
+            cooValues.insert(cooValues.begin() + posi, randomdouble()/10);
+            
+            posi++;
+            nnz++;
+        }*/
+    int posi = 0;
+
+    std::vector<int> row_aux;
+    std::vector<int> col_aux;
+    std::vector<double> values;
+    std::vector<bool> seen(rows * cols, false);
+    int ini_cols = cols;
+    int ini_rows = rows;
+    for (int i = 0; i < cooValues.size(); ++i)
+        seen[cooRowInd[i] * ini_cols + cooColInd[i]] = true;
+
+    std::cout << ini2 << " " << end2 << " " << ini1 << " " << end1<< std::endl;
+   /* for (int i = 0; i < nnz; ++i)
+    {
+        std::cout << i << " " << cooRowInd[i] << " " << cooColInd[i] << std::endl;
+
+    }*/
+
+
+    for (int nj = ini2; nj < end2; nj++)
+        for (int ni = ini1; ni < end1; ni++)
+        {
+            while (posi < cooValues.size() && (cooRowInd[posi] < nj 
+                                              || (cooRowInd[posi] == nj && cooColInd[posi] < ni)) ) {
+              //  std::cout << "YES! " << nj << " " << ni << " , " << cooRowInd[posi] << " " << cooColInd[posi] << std::endl;
+
+                row_aux.push_back(cooRowInd[posi]);
+                col_aux.push_back(cooColInd[posi]);
+                values.push_back(cooValues[posi]);
+                posi++;            }
+
+            if (double(rand() % 1000) / 1000 < sparsity) {
+                if (posi < cooValues.size() && cooRowInd[posi] == nj && cooColInd[posi] == ni) {
+                    row_aux.push_back(nj);
+                    col_aux.push_back(ni);
+                    values.push_back(cooValues[posi]);
+                    posi++;
+
+                }
+                continue;
+            }
+
+            if ( posi < cooValues.size() && cooRowInd[posi] == nj && cooColInd[posi] == ni)
+            {
+                //std::cout << "FOUND! " << nj << " " << ni << " , " << cooRowInd[posi] << " " << cooColInd[posi] << std::endl;
+
+                row_aux.push_back(nj);
+                col_aux.push_back(ni);
+                values.push_back(cooValues[posi]);
+
+
+                posi++;
+                continue;
+            }
+
+            if (ini_cols>ni && ini_rows > nj && seen[nj*ini_cols+ni])
+                std::cout << "BAD! " << nj << " " << ni <<" , " << cooRowInd[posi] << " " << cooColInd[posi] << std::endl;
+
+            row_aux.push_back(nj);
+            col_aux.push_back(ni);
+            values.push_back(randomdouble()/sqrt(nodes));
+            nnz++;
+            if (nj >= rows)rows = nj + 1;
+            if (ni >= cols)cols = ni + 1;
+
+
+        }
+
+    while (posi < cooValues.size())
+    {
+        row_aux.push_back(cooRowInd[posi]);
+        col_aux.push_back(cooColInd[posi]);
+        values.push_back(cooValues[posi]);
+
+
+        posi++;
+    }
+
+    cooRowInd = row_aux;
+    cooColInd = col_aux;
+    cooValues = values;
+
+   seen = std::vector<bool>(rows * cols, false);
+ 
+
+    
+
 }
 
 bool COO_matrix::insert_elm(int node_i, int node_j, double value)
@@ -196,13 +332,21 @@ int sign(double val)
     return (int(0) < val) - (val < int(0));
 }
 
-int max_pos(int ini, int end, std::vector<double> values)
+int max_pos(int ini, int end, const std::vector<double> &values)
 {
     int maxi = ini;
     for(int i = ini; i < end; ++i)
         if (values[maxi] < values[i])
             maxi = i;
     return maxi;
+}
+
+double sum(const std::vector<double> &v)
+{
+    double sum = 0;
+    for (double val : v)
+        sum += val;
+    return sum;
 }
 
 
