@@ -1,13 +1,24 @@
 #include "RNN.cuh"
 
-
 RNN::RNN()
 { }
 
-RNN::RNN(int i, int o, int n, double lr, int m_d, int bat, std::vector<activation_function> &a_f,  COO_matrix &w, cusparseHandle_t&  hand)
+RNN::RNN(
+	int i, 
+	int o, 
+	int n, 
+	double lr, 
+	int m_d, 
+	int bat, 
+	std::vector<activation_function> &a_f,  
+	COO_matrix &w, 
+	cusparseHandle_t&  hand
+)
 {
 	handle = &hand;
 
+	time_step = 0;
+	
 	dev_ini = false;
 	ini = i;
 	out = o;
@@ -19,17 +30,17 @@ RNN::RNN(int i, int o, int n, double lr, int m_d, int bat, std::vector<activatio
 	batch = bat;
 	
 	act_f = a_f;
-	current_values = std::vector<double>(nodes, 0);
-	current_dx = std::vector<double>(nodes, 0);
+	current_values = Vector(nodes, 0);
+	current_dx = Vector(nodes, 0);
 	
-	biases = std::vector<double>(nodes, 0);
-	biases_update = std::vector<double>(nodes, 0);
+	biases = Vector(nodes, 0);
+	biases_update = Vector(nodes, 0);
 
 	weights = w;
-	weights_update = std::vector<double>(w.nnz, 0);
+	weights_update = Vector(w.nnz, 0);
 
-	values_through_time = std::vector<std::vector<double>>();
-	dx_through_time = std::vector<std::vector<double>>();
+	values_through_time = Matrix(max_depth, Vector(nodes, 0));
+	dx_through_time = Matrix(max_depth, Vector(nodes, 0));
 
 	mask = std::vector<int>(nodes, 0);
 }
@@ -39,6 +50,11 @@ RNN::~RNN(){
 		//std::cout << "Initialized" << std::endl;
 		empty_device();
 	}
+}
+
+int RNN::n_offset_by_time()
+{
+	return nodes * (time_step % max_depth);
 }
 
 void RNN::initialize_device_public()
@@ -55,12 +71,10 @@ void RNN::initialize_device_public()
 void RNN::initialize_device() 
 {
 	dev_ini = true;
-	//Weights and input/output vectors
+	//Weights
 	cudaMalloc((void**)&dA_rows, weights.nnz * sizeof(int));
 	cudaMalloc((void**)&dA_columns, weights.nnz * sizeof(int));
 	cudaMalloc((void**)&dA_values, weights.nnz * sizeof(double));
-	cudaMalloc((void**)&dX, nodes * sizeof(double));
-	cudaMalloc((void**)&dY, nodes * sizeof(double));
 
 	//Biases
 	cudaMalloc((void**)&d_biases, nodes * sizeof(double));
@@ -69,15 +83,23 @@ void RNN::initialize_device()
 	cudaMalloc((void**)&d_weights_update, weights.nnz * sizeof(double));
 	cudaMalloc((void**)&d_biases_update, nodes * sizeof(double));
 
-	// Gradient
-	cudaMalloc((void**)&d_gradient, nodes * sizeof(double));
-	cudaMalloc((void**)&d_dx, nodes * sizeof(double));
-
 	//Adam
 	cudaMalloc((void**)&d_m, weights.nnz * sizeof(double));
 	cudaMalloc((void**)&d_v, weights.nnz * sizeof(double));
 	cudaMalloc((void**)&d_m_corr, weights.nnz * sizeof(double));
 	cudaMalloc((void**)&d_v_corr, weights.nnz * sizeof(double));
+
+	//Values through time
+	cudaMalloc((void**)&d_values_through_time, nodes * max_depth * sizeof(double));
+	cudaMalloc((void**)&d_dx_through_time, nodes * max_depth * sizeof(double));
+
+	//Input / Output vectors
+	cudaMalloc((void**)&dX, nodes * sizeof(double));
+	cudaMalloc((void**)&dY, nodes * sizeof(double));
+
+	// Gradient
+	cudaMalloc((void**)&d_gradient, nodes * sizeof(double));
+	cudaMalloc((void**)&d_dx, nodes * sizeof(double));
 
 	// Input
 	cudaMalloc((void**)&d_input, nodes * sizeof(double));
@@ -106,7 +128,7 @@ void RNN::initialize_device()
 	cusparseSpMV_bufferSize(
 		*handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
 		&alpha, matA, vecX, &beta, vecY, CUDA_R_64F,
-		CUSPARSE_MV_ALG_DEFAULT, &bufferSize);
+		CUSPARSE_SPMV_ALG_DEFAULT, &bufferSize);
 	cudaMalloc(&dBuffer, bufferSize);
 
 }
@@ -137,12 +159,24 @@ void RNN::copy_weights_and_biases_to_device()
 }
 
 
-void RNN::execute_matrix_vector_prod( cusparseOperation_t transpose , cusparseDnVecDescr_t vect, cusparseDnVecDescr_t output)
-{
+void RNN::execute_matrix_vector_prod( 
+	cusparseOperation_t transpose, 
+	cusparseDnVecDescr_t vect, 
+	cusparseDnVecDescr_t output
+){
 	if (weights.nnz == 0) return;
-	cusparseSpMV(*handle, transpose,
-		&alpha, matA, vect, &beta, output, CUDA_R_64F,
-		CUSPARSE_MV_ALG_DEFAULT, dBuffer);
+	cusparseSpMV(
+		*handle, 
+		transpose,
+		&alpha, 
+		matA, 
+		vect, 
+		&beta, 
+		output, 
+		CUDA_R_64F,
+		CUSPARSE_SPMV_ALG_DEFAULT, 
+		dBuffer
+	);
 }
 
 int RNN::get_blocks(int size)
@@ -169,6 +203,7 @@ void RNN::execute_update_gradient()
 	int threads = get_threads(blocks, size);
 	multKernel<<< blocks, threads >>>(d_gradient, 1, d_dx, size);
 
+	/*
 	// cudaDeviceSynchronize waits for the kernel to finish, and returns
     // any errors encountered during the launch.
 	cudaError_t cudaStatus = cudaGetLastError();
@@ -182,7 +217,7 @@ void RNN::execute_update_gradient()
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching addKernel!\n", cudaStatus);
 	}
-
+	*/
 }
 
 void RNN::execute_sub_biases_update()
@@ -192,12 +227,14 @@ void RNN::execute_sub_biases_update()
 	int blocks = get_blocks(size);
 	int threads = get_threads(blocks, size);
 	addKernel<<< blocks, threads >>>(d_biases_update, -1, d_gradient, size);
+	
+	/*
 	cudaDeviceSynchronize();
 
 	cudaError_t cudaStatus = cudaGetLastError();
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "Sub biases launch failed: %s\n", cudaGetErrorString(cudaStatus));
-	}
+	}*/
 
 }
 
@@ -208,31 +245,39 @@ void RNN::execute_add_biases()
 	int blocks = get_blocks(size);
 	int threads = get_threads(blocks, size);
 	addKernel<<< blocks, threads >>>(dX, 1, d_biases, size);
+	
+	/*
 	cudaDeviceSynchronize();
 
 	cudaError_t cudaStatus = cudaGetLastError();
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "Add biases launch failed: %s\n", cudaGetErrorString(cudaStatus));
 	}
-
+	*/
 }
 
-void RNN::execute_add_input_values(std::vector<double> input_values)
+void RNN::execute_set_input_values(Vector& input_values)
 {
 	int size = input_values.size();
-
 	if (size == 0) return;
 	copy_vect_to_device(input_values, d_input, size);
-	int blocks = get_blocks(size);
-	int threads = get_threads(blocks, size);
-	addKernel<<< blocks, threads >>>(dX, 1, d_input, size);
+}
+
+void RNN::execute_add_input_values(int how_many_input_values)
+{
+	if (how_many_input_values == 0) return;
+	int blocks = get_blocks(how_many_input_values);
+	int threads = get_threads(blocks, how_many_input_values);
+	addKernel<<< blocks, threads >>>(dX, 1, d_input, how_many_input_values);
+
+	/*
 	cudaDeviceSynchronize();
 
 	cudaError_t cudaStatus = cudaGetLastError();
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "Add input launch failed: %s\n", cudaGetErrorString(cudaStatus));
 	}
-
+	*/
 }
 
 void RNN::execute_sub_weights_update()
@@ -243,11 +288,13 @@ void RNN::execute_sub_weights_update()
 	int blocks = get_blocks(size);
 	int threads = get_threads(blocks, size);
 	TmultVectsKernel<<<blocks, threads>>>(d_weights_update, dA_rows, dA_columns, d_gradient, -1, dX, size);
+	
+	/*
 	cudaDeviceSynchronize();
 	cudaError_t cudaStatus = cudaGetLastError();
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "Update gradient launch failed: %s\n", cudaGetErrorString(cudaStatus));
-	}
+	}*/
 
 }
 
@@ -258,17 +305,18 @@ void RNN::execute_update_weights_and_biases()
 	int blocks = get_blocks(size);
 	int threads = get_threads(blocks, size);
 	addKernel<<< blocks, threads >>>(dA_values, learning_rate/batch, d_weights_update, size);
-	cudaDeviceSynchronize();
+	//cudaDeviceSynchronize();
 
 	size = nodes;
 	blocks = get_blocks(size);
 	threads = get_threads(blocks, size);
 	addKernel<<< blocks, threads >>>(d_biases, learning_rate/batch, d_biases_update, size);
-	cudaDeviceSynchronize();
+	//cudaDeviceSynchronize();
 }
 
 void RNN::execute_update_weights_and_biases_Adam()
 {
+	// We divide by batch size to average the gradients
 	int size = weights.nnz;
 	if (size == 0) return;
 	int blocks = get_blocks(size);
@@ -276,24 +324,26 @@ void RNN::execute_update_weights_and_biases_Adam()
 	powBeta1 *= beta1;
 	powBeta2 *= beta2;
 	updateAdamKernel <<<blocks, threads>>> (beta1, beta2, d_m, d_v, d_m_corr, d_v_corr, d_weights_update, size, powBeta1, powBeta2);
-	cudaDeviceSynchronize();
+	//cudaDeviceSynchronize();
 	addWithAdamKernel<<<blocks, threads>>> (dA_values, learning_rate/batch, d_m_corr, d_v_corr, eps, size);
-	cudaDeviceSynchronize();
+	//cudaDeviceSynchronize();
+	/*
 	cudaError_t cudaStatus = cudaGetLastError();
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "Adam launch failed: %s\n", cudaGetErrorString(cudaStatus));
-	}
+	}*/
 
 	size = nodes;
 	blocks = get_blocks(size);
 	threads = get_threads(blocks, size);
-	addKernel << < blocks, threads >> > (d_biases, learning_rate/ batch, d_biases_update, size);
-	cudaDeviceSynchronize();
+	addKernel <<< blocks, threads >>> (d_biases, learning_rate/ batch, d_biases_update, size);
+	//cudaDeviceSynchronize();
+	/*
 	cudaStatus = cudaGetLastError();
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "Biases update launch failed: %s\n", cudaGetErrorString(cudaStatus));
 	}
-
+	*/
 }
 
 void RNN::execute_use_activation_functions()
@@ -302,23 +352,24 @@ void RNN::execute_use_activation_functions()
 	if (size == 0) return;
 	int blocks = get_blocks(size);
 	int threads = get_threads(blocks, size);
+	/*
 	if (training) {
 		for (int i = ini+out; i < nodes; ++i)
 			mask[i] = int(double(rand() % 1000) / 1000 < inp_dropout);
 		copy_vect_to_device(mask, d_mask, nodes);
-	}
-	
-		
-	useActKernel << < blocks, threads >> > (dX, d_dx, d_act_f, size, d_mask);
-	cudaDeviceSynchronize();
+	}*/
+	useActKernel <<< blocks, threads >>> (dX, d_dx, d_act_f, size, d_mask);
+	move_vect_of_device(d_dx_through_time + n_offset_by_time(), d_dx, nodes);
+	//cudaDeviceSynchronize();
+	/*
 	cudaError_t cudaStatus = cudaGetLastError();
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "Use activation func launch failed: %s\n", cudaGetErrorString(cudaStatus));
 	}
-
+	*/
 }
 
-void RNN::copy_vect_to_device( std::vector<double> &values, double* device_vect, int size )
+void RNN::copy_vect_to_device( Vector &values, double* device_vect, int size )
 {
 	if (size == 0) return;
 	cudaMemcpy(device_vect, values.data(), size * sizeof(double),
@@ -353,12 +404,13 @@ void RNN::reset_vect(double* device_vect, int size)
 	int blocks = get_blocks(size);
 	int threads = get_threads(blocks, size);
 	resetVectKernel<<<blocks, threads>>>(device_vect, size);
+	/*
 	cudaDeviceSynchronize();
 	cudaError_t cudaStatus = cudaGetLastError();
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "Reset vect launch failed: %s\n", cudaGetErrorString(cudaStatus));
 	}
-
+	*/
 }
 
 void RNN::reset_vect(int* device_vect, int size)
@@ -367,12 +419,13 @@ void RNN::reset_vect(int* device_vect, int size)
 	int blocks = get_blocks(size);
 	int threads = get_threads(blocks, size);
 	resetVectKernel << <blocks, threads >> > (device_vect, size);
+	/*
 	cudaDeviceSynchronize();
 	cudaError_t cudaStatus = cudaGetLastError();
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "Reset vect launch failed: %s\n", cudaGetErrorString(cudaStatus));
 	}
-
+	*/
 }
 
 void RNN::empty_device()
@@ -401,6 +454,8 @@ void RNN::empty_device()
 	cudaFree(d_mask);
 	cudaFree(d_act_f);
 	cudaFree(d_dx);
+	cudaFree(d_values_through_time);
+	cudaFree(d_dx_through_time);
 }
 
 void RNN::read_weights_of_device()
@@ -410,14 +465,14 @@ void RNN::read_weights_of_device()
 		cudaMemcpyDeviceToHost);
 }
 
-void RNN::read_vect_of_device(std::vector<double>& result, double* device_vect, int size)
+void RNN::read_vect_of_device(Vector& result, double* device_vect, int size)
 {
 	if (size == 0) return;
 	cudaMemcpy(result.data(), device_vect, size * sizeof(double),
 		cudaMemcpyDeviceToHost);
  }
 
-void RNN::read_weights_and_biases_from_device(std::vector<double>& weights_, std::vector<double>& biases_)
+void RNN::read_weights_and_biases_from_device(Vector& weights_, Vector& biases_)
 {
 	if (weights.nnz == 0) return;
 	cudaMemcpy(weights_.data(), dA_values, weights.nnz * sizeof(double),
@@ -436,6 +491,7 @@ void RNN::read_weights_and_biases_from_device(std::vector<double>& weights_, std
 		fprintf(stderr, "Read public biases failed: %s\n", cudaGetErrorString(cudaStatus));
 	}
 }
+
 ////////////////////////////////////////////////////////////
 
 void RNN::copy_wb_to_dev()
@@ -450,14 +506,14 @@ void RNN::add_connection(int node_i, int node_j, double value)
 
 void RNN::full_reset()
 {
-	current_values = std::vector<double>(nodes, 0);
-	current_dx = std::vector<double>(nodes, 0);
+	current_values = Vector(nodes, 0);
+	current_dx = Vector(nodes, 0);
 
-	values_through_time = std::vector<std::vector<double>>();
-	dx_through_time = std::vector<std::vector<double>>();
+	values_through_time = Matrix(max_depth, Vector(nodes, 0));
+	dx_through_time = Matrix(max_depth, Vector(nodes, 0));
 
-	biases_update = std::vector<double>(nodes, 0);
-	weights_update = std::vector<double>(weights.nnz, 0);
+	biases_update = Vector(nodes, 0);
+	weights_update = Vector(weights.nnz, 0);
 
 	reset_vect(dX, nodes);
 	reset_vect(dY, nodes);
@@ -471,6 +527,8 @@ void RNN::full_reset()
 	reset_vect(d_input, nodes);
 	reset_vect(d_dx, nodes);
 	reset_vect(d_mask, nodes);
+	reset_vect(d_values_through_time, nodes * max_depth);
+	reset_vect(d_dx_through_time, nodes * max_depth);
 
 	powBeta1 = 0.9;
 	powBeta2 = 0.999;
@@ -479,51 +537,50 @@ void RNN::full_reset()
 
 void RNN::reset()
 {
-	current_values = std::vector<double>(nodes, 0);
-	current_dx = std::vector<double>(nodes, 0);
+	current_values = Vector(nodes, 0);
+	current_dx = Vector(nodes, 0);
 
-	values_through_time = std::vector<std::vector<double>>();
-	dx_through_time = std::vector<std::vector<double>>();
+	values_through_time = Matrix(max_depth, Vector(nodes, 0));
+	dx_through_time = Matrix(max_depth, Vector(nodes, 0));
 	reset_vect(dX, nodes);
 	reset_vect(d_mask, nodes);
+	reset_vect(d_values_through_time, nodes*max_depth);
+	reset_vect(d_dx_through_time, nodes*max_depth);
 
-}
-void RNN::use_activation_functions()
-{
-	execute_use_activation_functions();
-
-	read_vect_of_device(current_values,            dX, nodes);
-	read_vect_of_device(current_dx,              d_dx, nodes);
-
-	values_through_time.push_back(current_values);
-	dx_through_time.push_back(current_dx);
-	
-	if (max_depth < values_through_time.size())
-	{
-		values_through_time.erase(values_through_time.begin());
-		dx_through_time.erase(dx_through_time.begin());
-	}
 }
 
 void RNN::forward_prop()
 {
 	execute_add_biases();
-	use_activation_functions();
-	
-	auto values = values_through_time[values_through_time.size()-1];
-	
+	execute_use_activation_functions();
+	// GET RID OF THIS!!
+	/*read_vect_of_device(current_values, dX, nodes);
+	read_vect_of_device(current_dx,   d_dx, nodes);
+
+	values_through_time.push_back(current_values);
+	dx_through_time.push_back(current_dx);
+
+	if (max_depth < values_through_time.size())
+	{
+		values_through_time.erase(values_through_time.begin());
+		dx_through_time.erase(dx_through_time.begin());
+	}*/
+	//auto values = values_through_time[values_through_time.size()-1];
 	//std::cout << "Before"<< std::endl;
-	copy_vect_to_device(values, dX, nodes);
+	//copy_vect_to_device(values, dX, nodes);
 	//std::cout << values[0] << " " << values[1] << std::endl;*/
 	execute_matrix_vector_prod(CUSPARSE_OPERATION_NON_TRANSPOSE, vecX, vecY);
-	move_vect_of_device(dX, dY, nodes);
 	//read_vect_of_device(values, dY, nodes);
 	//std::cout << "After" << std::endl;
 	//std::cout << values[0] << " " << values[1] << std::endl;
+	move_vect_of_device(d_values_through_time + n_offset_by_time(), dX, nodes);
 
+	move_vect_of_device(dX, dY, nodes);
+
+	time_step++;
 }
 
-double mean(std::vector<double> &values)
+double mean(Vector &values)
 {
 	double sum = 0;
 	for (double val : values)
@@ -531,7 +588,7 @@ double mean(std::vector<double> &values)
 	return sum / values.size();
 }
 
-void RNN::softmax(std::vector<double>& values, int ini, int fi)
+void RNN::softmax(Vector& values, int ini, int fi)
 {
 	int s = values.size();
 	double max = values[0];
@@ -549,14 +606,14 @@ void RNN::softmax(std::vector<double>& values, int ini, int fi)
 	for (int i = ini; i < fi; ++i) 
 		values[i] /= sum;
 }
-double RNN::backward_prop(std::vector<double> &correct_vals, bool classif)
+double RNN::backward_prop(Vector &correct_vals, bool classif)
 {
 	auto layer = values_through_time.size()-1;
 
 	auto values = values_through_time[layer];
 
-	std::vector<double> error(out,0);
-	std::vector<double> gradient(nodes,0);
+	Vector error(out,0);
+	Vector gradient(nodes,0);
     
 	int max_i = 0;
 	double max_val = values[max_i];
@@ -595,9 +652,11 @@ double RNN::backward_prop(std::vector<double> &correct_vals, bool classif)
 
 		copy_vect_to_device(node_dx, d_dx, nodes);
 		execute_update_gradient();
-
-		read_vect_of_device(gradient, d_gradient, nodes);
+		
 		//gradient clipping
+		/*
+		read_vect_of_device(gradient, d_gradient, nodes);
+		
 		double norm = 0;
 		for (int i = 0; i < nodes; ++i)
 			norm += gradient[i]*gradient[i];
@@ -614,12 +673,13 @@ double RNN::backward_prop(std::vector<double> &correct_vals, bool classif)
 				gradient[i] *= 0.001/(norm+eps);
 			copy_vect_to_device(gradient, d_gradient, nodes);
 		}
-		/*double norm2 = 0;
+		*/
+		/*
+		double norm2 = 0;
 		for (int i = 0; i < nodes; ++i)
 			norm2 += gradient[i] * gradient[i];
 		norm2 = sqrt(norm2);
 		std::cout << norm << " "<<norm2 << std::endl;*/
-		//
 
 		execute_sub_biases_update();
 
@@ -636,13 +696,8 @@ double RNN::backward_prop(std::vector<double> &correct_vals, bool classif)
 	else return mean(error);
 }
 
-void RNN::set_input_values(std::vector<double>& input_values)
-{
-	execute_add_input_values(input_values);
-}
-
 //synflow///////////////////////////////////////////////////////////////////////////
-std::vector<double> RNN::synflow_cycle( bool classif, std::vector<double> &ones, int wich )
+Vector RNN::synflow_cycle( bool classif, Vector &ones, int wich )
 {
 	training = true;
 	read_weights_of_device();
@@ -669,7 +724,7 @@ std::vector<double> RNN::synflow_cycle( bool classif, std::vector<double> &ones,
 		softmax(values_through_time[values_through_time.size() - 1], ini, ini + out);
 
 	double sum_val = sum(values_through_time[values_through_time.size() - 1]);
-	std::vector<double> correct_values(out, sum_val);
+	Vector correct_values(out, sum_val);
 	if (wich != -1)
 		for (int i = 0; i < out; ++i)
 			if (wich != i) 
@@ -696,7 +751,7 @@ std::vector<double> RNN::synflow_cycle( bool classif, std::vector<double> &ones,
 	return ret;
 }
 
-std::vector<double> RNN::synflow_cycle(bool classif, std::vector<std::pair<std::vector<double>, double>>& dataset, int samples)
+Vector RNN::synflow_cycle(bool classif, std::vector<std::pair<Vector, double>>& dataset, int samples)
 {
 	training = true;
 	read_weights_of_device();
@@ -711,7 +766,7 @@ std::vector<double> RNN::synflow_cycle(bool classif, std::vector<std::pair<std::
 	double error = 0;
 	for (int i = 0; i < out; ++i) {
 		int index;
-		std::vector<double> inp(ini, 0);
+		Vector inp(ini, 0);
 
 		for (int j = 0; j < samples; ++j)
 		{
@@ -764,7 +819,7 @@ std::vector<double> RNN::synflow_cycle(bool classif, std::vector<std::pair<std::
 			softmax(values_through_time[values_through_time.size() - 1], ini, ini + out);
 
 		double sum_val = sum(values_through_time[values_through_time.size() - 1]);
-		std::vector<double> correct_values(out, sum_val);
+		Vector correct_values(out, sum_val);
 		for (int j = 0; j < out; ++j)
 			if (j != i)
 				correct_values[j] = values_through_time[values_through_time.size() - 1][ini + j];
@@ -789,107 +844,146 @@ std::vector<double> RNN::synflow_cycle(bool classif, std::vector<std::pair<std::
 }
 //////////////////////////////////////////////////////////////////////////////////
 
-void RNN::partition(std::vector<std::vector<double>>& inp, std::vector<double>& sol_list, double train_val_part, double val_test_part,
-	std::vector < std::pair<std::vector<double>, double> >& dataset, std::vector < std::pair<std::vector<double>, double> >&  test_data,
-	std::vector < std::pair<std::vector<double>, double> >& val_data, double div, bool shuffle) {
+void RNN::partition(Matrix& inp, Vector& sol_list, double train_val_part, double val_test_part,
+	std::vector < std::pair<Vector, double> >& dataset, std::vector < std::pair<Vector, double> >&  test_data,
+	std::vector < std::pair<Vector, double> >& val_data, double div, bool shuffle) {
 
 	srand(time(0));
 
 	for (int i = 0; i < inp.size(); i++) {
-		std::vector<double> in(inp[i].size());
+		Vector in(inp[i].size());
 		for (int j = 0; j < inp[i].size(); ++j)
 			in[j] = double(inp[i][j]) / div;
-		dataset.push_back(std::pair<std::vector<double>, double>(in, sol_list[i]));
+		dataset.push_back(std::pair<Vector, double>(in, sol_list[i]));
 	}
 
 	if(shuffle)
 		std::random_shuffle(dataset.begin(), dataset.end());
 
-	test_data = std::vector< std::pair<std::vector<double>, double> >(dataset.begin() + dataset.size() * train_val_part, dataset.end());
+	test_data = std::vector< std::pair<Vector, double> >(dataset.begin() + dataset.size() * train_val_part, dataset.end());
 
 	dataset.resize(dataset.size() * train_val_part);
 
-	val_data = std::vector < std::pair<std::vector<double>, double> >(test_data.begin() + test_data.size() * val_test_part, test_data.end());
+	val_data = std::vector < std::pair<Vector, double> >(test_data.begin() + test_data.size() * val_test_part, test_data.end());
 
 	test_data.resize(test_data.size() * val_test_part);
 }
 
 void RNN::partition(std::vector<std::vector<int>>& inp, std::vector<int>& sol_list, double train_val_part, double val_test_part,
-	std::vector < std::pair<std::vector<double>, double> >& dataset, std::vector < std::pair<std::vector<double>, double> >& test_data,
-	std::vector < std::pair<std::vector<double>, double> >& val_data, double div, bool shuffle) {
+	std::vector < std::pair<Vector, double> >& dataset, std::vector < std::pair<Vector, double> >& test_data,
+	std::vector < std::pair<Vector, double> >& val_data, double div, bool shuffle) {
 
 	srand(time(0));
 
 	for (int i = 0; i < inp.size(); i++) {
-		std::vector<double> in(inp[i].size());
+		Vector in(inp[i].size());
 		for (int j = 0; j < inp[i].size(); ++j)
 			in[j] = double(inp[i][j])/div;
-		dataset.push_back(std::pair<std::vector<double>, double>(in, sol_list[i]));
+		dataset.push_back(std::pair<Vector, double>(in, sol_list[i]));
 	}
 
 	if (shuffle)
 		std::random_shuffle(dataset.begin(), dataset.end());
 
-	test_data = std::vector< std::pair<std::vector<double>, double> >(dataset.begin() + dataset.size() * train_val_part, dataset.end());
+	test_data = std::vector< std::pair<Vector, double> >(dataset.begin() + dataset.size() * train_val_part, dataset.end());
 
 	dataset.resize(dataset.size() * train_val_part);
 
-	val_data = std::vector < std::pair<std::vector<double>, double> >(test_data.begin() + test_data.size() * val_test_part, test_data.end());
+	val_data = std::vector < std::pair<Vector, double> >(test_data.begin() + test_data.size() * val_test_part, test_data.end());
 
 	test_data.resize(test_data.size() * val_test_part);
 }
 
 
 void RNN::partition(std::vector<std::vector<uint8_t>>& inp, std::vector<uint8_t>& sol_list, double train_val_part, double val_test_part,
-	std::vector < std::pair<std::vector<double>, double> >& dataset, std::vector < std::pair<std::vector<double>, double> >& test_data,
-	std::vector < std::pair<std::vector<double>, double> >& val_data, double div, bool shuffle) {
+	std::vector < std::pair<Vector, double> >& dataset, std::vector < std::pair<Vector, double> >& test_data,
+	std::vector < std::pair<Vector, double> >& val_data, double div, bool shuffle) {
 
 	srand(time(0));
 
 	for (int i = 0; i < inp.size(); i++) {
-		std::vector<double> in(inp[i].size());
+		Vector in(inp[i].size());
 		for (int j = 0; j < inp[i].size(); ++j)
 			in[j] = double(inp[i][j]) / div;
-		dataset.push_back(std::pair<std::vector<double>, double>(in, sol_list[i]));
+		dataset.push_back(std::pair<Vector, double>(in, sol_list[i]));
 	}
 
 	if (shuffle)
 		std::random_shuffle(dataset.begin(), dataset.end());
 
-	test_data = std::vector< std::pair<std::vector<double>, double> >(dataset.begin() + dataset.size() * train_val_part, dataset.end());
+	test_data = std::vector< std::pair<Vector, double> >(dataset.begin() + dataset.size() * train_val_part, dataset.end());
 
 	dataset.resize(dataset.size() * train_val_part);
 
-	val_data = std::vector < std::pair<std::vector<double>, double> >(test_data.begin() + test_data.size() * val_test_part, test_data.end());
+	val_data = std::vector < std::pair<Vector, double> >(test_data.begin() + test_data.size() * val_test_part, test_data.end());
 
 	test_data.resize(test_data.size() * val_test_part);
 }
 
-double RNN::forward_prop_cycle(std::vector<double>& input_values, std::vector<double>& correct_values, bool classif)
+void RNN::set_input_values(Vector& input_values)
+{
+	execute_set_input_values(input_values);
+}
+
+void RNN::add_input_values(int how_many_input_values)
+{
+	execute_add_input_values(how_many_input_values);
+}
+
+void RNN::read_values_through_time_from_device()
+{
+	//Matrix previous_values_through_time = values_through_time;
+	
+	auto aux_vals_vect = Vector(max_depth * nodes);
+	auto aux_dx_vect = Vector(max_depth * nodes);
+	read_vect_of_device(aux_vals_vect, d_values_through_time, max_depth * nodes);
+	read_vect_of_device(aux_dx_vect, d_dx_through_time, max_depth * nodes);
+	for (int i = max_depth - 1; i >= 0; i--) {
+		int index = (time_step + i) % max_depth;
+		//std::cout << "index: " << index << ", i: "<<i<<std::endl;
+		//std::cout << "nodes: " << nodes << ", index * nodes: " << index * nodes << std::endl;
+		//std::cout << "max depth * nodes: " << max_depth * nodes << ", size of values through time " << values_through_time.size() * values_through_time[0].size() << std::endl;
+		//read_vect_of_device(values_through_time[i], d_values_through_time + index * nodes, nodes);
+		//read_vect_of_device(dx_through_time[i], d_dx_through_time + index * nodes, nodes);
+		for (int n = 0; n < nodes; ++n) {
+			values_through_time[i][n] = aux_vals_vect[i * nodes + n];
+			dx_through_time[i][n] = aux_dx_vect[i * nodes + n];
+		}
+	}
+	/*
+	for (int d = 0; d < max_depth; ++d) {
+		for (int i = 0; i < nodes; ++i) {
+			std::cout << "(" << previous_values_through_time[d][i] << ", " << values_through_time[d][i] << ") ";
+		}
+		std::cout << std::endl;
+	}
+	std::cout << std::endl << std::endl << std::endl;
+	*/
+}
+double RNN::forward_prop_cycle(Vector& input_values, Vector& correct_values, bool classif)
 {
 	double error = 0;
-	for (int i = 0; i < max_iters; ++i)
-	{
-		set_input_values(input_values);
+	execute_set_input_values(input_values);
+	for (int i = 0; i < max_iters; ++i) {
+		execute_add_input_values(input_values.size());
 		forward_prop();
 	}
-
+	read_values_through_time_from_device();
 	if (classif)
 		softmax(values_through_time[values_through_time.size() - 1], ini, ini + out);
 
 	error = get_error(correct_values, classif);
 	return error;
 }
-double RNN::forward_prop_one_inp_cycle(std::vector<double>& input_values, std::vector<double>& correct_values, bool classif)
+double RNN::forward_prop_one_inp_cycle(Vector& input_values, Vector& correct_values, bool classif)
 {
 	double error = 0;
 
-	set_input_values(input_values);
+	execute_set_input_values(input_values);
+	execute_add_input_values(input_values.size());
 	for (int i = 0; i < max_iters; ++i)
-	{
 		forward_prop();
-	}
-
+	read_values_through_time_from_device();
 	if (classif)
 		softmax(values_through_time[values_through_time.size() - 1], ini, ini + out);
 
@@ -897,14 +991,14 @@ double RNN::forward_prop_one_inp_cycle(std::vector<double>& input_values, std::v
 	return error;
 }
 
-double RNN::get_error(std::vector<double>& correct_values, bool classif)
+double RNN::get_error(Vector& correct_values, bool classif)
 {
 	auto layer = values_through_time.size() - 1;
 
 	auto values = values_through_time[layer];
 
-	std::vector<double> error(out, 0);
-	std::vector<double> gradient(nodes, 0);
+	Vector error(out, 0);
+	Vector gradient(nodes, 0);
 
 	int max_i = 0;
 	double max_val = values[max_i];
@@ -929,24 +1023,33 @@ double RNN::get_error(std::vector<double>& correct_values, bool classif)
 	else return mean(error);
 }
 
-double RNN::train_step(std::vector<double> &input_values, std::vector<double> &correct_values, bool classif)
-{
+double RNN::train_step(
+	Vector &input_values, 
+	Vector &correct_values, 
+	bool classif
+){
 	double error = 0;
 	training = true;
+	set_input_values(input_values);
 	for (int i = 0; i < max_iters; ++i)
 	{
-		set_input_values(input_values);
+		add_input_values(input_values.size());
 		forward_prop();
 	}
-	if (classif)
+	read_values_through_time_from_device();
+	if (classif);
 		softmax(values_through_time[values_through_time.size()-1], ini, ini+out);
 
-	error = backward_prop(correct_values, classif);
+	error = backward_prop(correct_values, classif); // 35% of the time is spent here
 	training = false;
 	return error;
 }
 
-double RNN::train_step_one_inp_set(std::vector<double>& input_values, std::vector<double>& correct_values, bool classif)
+double RNN::train_step_one_inp_set(
+	Vector& input_values, 
+	Vector& correct_values, 
+	bool classif
+)
 {
 	double error = 0;
 	training = true;
@@ -962,7 +1065,7 @@ double RNN::train_step_one_inp_set(std::vector<double>& input_values, std::vecto
 	return error;
 }
 
-double RNN::time_sens_train_step(std::vector< std::vector<double>>& input_values, std::vector< std::vector<double>>& correct_values, bool classif)
+double RNN::time_sens_train_step(std::vector< Vector>& input_values, std::vector< Vector>& correct_values, bool classif)
 {
 	double error = 0;
 	training = true;
@@ -1116,9 +1219,9 @@ void RNN_xor_problem()
 	RNN rnn(ini_nodes, out_nodes, nodes, learning_rate, depth, batch,  act_f, mat, handle);
 	rnn.initialize_device_public();
 
-	std::vector<std::vector<double> > inp = { {0, 0}, { 0,1 }, { 1,0 }, { 1,1 } };
+	std::vector<Vector > inp = { {0, 0}, { 0,1 }, { 1,0 }, { 1,1 } };
 
-	std::vector<double> sol = { 0 };
+	Vector sol = { 0 };
 
 	for (int it = 0; it < 30000; it++) {
 		error_sum = 0;
@@ -1167,9 +1270,7 @@ void RNN_xor_problem()
 		rnn.reset();
 	}
 	
-}
-
-
+} 
 
 void RNN_mnist_problem()
 {
@@ -1231,8 +1332,8 @@ void RNN_mnist_problem()
 		indices[i] = i;
 
 	int examples = inp.size();
-	std::vector<double> input(28 * 28);
-	std::vector<double> sol(10);
+	Vector input(28 * 28);
+	Vector sol(10);
 	for (int it = 0; it < 10; it++) {
 		
 		int print_stop = examples / 10;
@@ -1348,8 +1449,8 @@ void RNN_mnist_problem( RNN& rnn, int exampl, int iters, bool test)
 	if (examples == -1)
 		examples = inp.size();
 
-	std::vector<double> input(28 * 28);
-	std::vector<double> sol(10);
+	Vector input(28 * 28);
+	Vector sol(10);
 	for (int it = 0; it < iters; it++) {
 		std::random_shuffle(indices.begin(), indices.end());
 		int print_stop = examples / 10;
@@ -1450,6 +1551,7 @@ void RNN_mnist_problem( RNN& rnn, int exampl, int iters, bool test)
 
 void RNN_mnist_autoencode_problem()
 {
+	int init_time = time(0);
 	cusparseHandle_t handle;
 	cusparseCreate(&handle);
 	int ini_nodes = 28 * 28;
@@ -1477,6 +1579,7 @@ void RNN_mnist_autoencode_problem()
 
 	//	mat.insert_elm(i, i+ini_nodes, 1);
 	}
+	std::cout<<"from ini to out all connected"<<std::endl;
 
 	for (int i = ini_nodes + out_nodes; i < nodes; ++i) {
 		for (int j = ini_nodes; j < ini_nodes + out_nodes; ++j)
@@ -1492,6 +1595,7 @@ void RNN_mnist_autoencode_problem()
 			for (int j = ini_nodes; j < ini_nodes + out_nodes; ++j)
 				mat.insert_elm(i, j, randomdouble() / 10);*/
 	}
+	std::cout<<"others connected"<<std::endl;
 
 	/*for (int i = 0; i < 10000; ++i)
 	{
@@ -1509,8 +1613,9 @@ void RNN_mnist_autoencode_problem()
 		indices[i] = i;
 
 	int examples = inp.size();
-	std::vector<double> input(28 * 28);
-	for (int it = 0; it < 100; it++) {
+	int resets = 0;
+	Vector input(28 * 28);
+	for (int it = 0; it < 1; it++) {
 
 		int print_stop = examples / 10;
 		for (int image = 0; image < examples; ++image)
@@ -1525,7 +1630,7 @@ void RNN_mnist_autoencode_problem()
 
 			error_sum += rnn.train_step(input, input, false);
 			//::cout << "hmmmmm" << std::endl;
-			if (image % batch == 0) {
+			if (false || image % batch == 0) {
 				//if (it % 1000 == 0)rnn.print_matrix();
 				rnn.update_weights_and_biases();
 			}
@@ -1534,6 +1639,7 @@ void RNN_mnist_autoencode_problem()
 				std::cout << "%" << 100 * image / examples << " error = " << error_sum / image << std::endl;
 				print_stop += examples / 10;
 			}
+			resets += 1;
 			rnn.reset();
 			//std::cout << "---------------------\n";
 		}
@@ -1545,6 +1651,10 @@ void RNN_mnist_autoencode_problem()
 
 	}
 
+	std::cout << "Time: " << time(0) - init_time << std::endl;
+	std::cout << "Resets: " << resets << std::endl;
+	return;
+	/*
 	auto test_inp = mnist::read_test_images();
 
 	examples = test_inp.size();
@@ -1597,7 +1707,7 @@ void RNN_mnist_autoencode_problem()
 		}
 		std::cout << std::endl;
 		rnn.reset();
-	}
+	}*/
 
 }
 
@@ -1645,9 +1755,9 @@ void RNN_sum_vect_problem()
 	rnn.bias_learning_rate = 0;
 	rnn.delay_iters = 0;
 	int examples = 10;
-	std::vector<std::vector<double>> inp(examples, std::vector<double>(1, 0));
+	Matrix inp(examples, Vector(1, 0));
 
-	std::vector<std::vector<double>> sol(examples, std::vector<double>(1, 0));
+	Matrix sol(examples, Vector(1, 0));
 	
 	for (int i = 0; i < examples; ++i)
 		inp[i][0] = randomdouble();
@@ -1712,9 +1822,9 @@ void RNN_previous_sign_problem()
 	rnn.max_depth = 2;
 
 	int examples = 100;
-	std::vector<std::vector<double>> inp(examples, std::vector<double>(1,0));
+	Matrix inp(examples, Vector(1,0));
 
-	std::vector<std::vector<double>> sol(examples, std::vector<double>(1,0));
+	Matrix sol(examples, Vector(1,0));
 	error_sum = 0;
 	for (int it = 0; it < 1000; it++) {
 		for (int i = 0; i < examples; ++i)
@@ -1783,9 +1893,9 @@ void RNN_shakespeare_problem() {
 	rnn.bias_learning_rate = 0;
 
 	int examples = 3;
-	std::vector<std::vector<double>> inp(examples, std::vector<double>(1, 0));
+	Matrix inp(examples, Vector(1, 0));
 
-	std::vector<std::vector<double>> sol(examples, std::vector<double>(1, 0));
+	Matrix sol(examples, Vector(1, 0));
 	for (int i = 0; i < examples; ++i)
 		inp[i][0] = randomdouble();
 
@@ -1872,9 +1982,9 @@ void RNN_delayed_str_problem()     {
 			s[i] = rand() % alphabet.size();
 
 
-		std::vector<std::vector<double>> inp(s.size(), std::vector<double>(alphabet.size(), 0));
+		Matrix inp(s.size(), Vector(alphabet.size(), 0));
 
-		std::vector<std::vector<double>> sol(s.size(), std::vector<double>(alphabet.size(), 0));
+		Matrix sol(s.size(), Vector(alphabet.size(), 0));
 
 		for (int i = 0; i < s.size(); ++i) {
 			inp[i][s[i]] = 1;
@@ -1920,8 +2030,8 @@ bool RNN_caltech101_sil_problem(RNN& rnn, int exampl, int iters, bool test, std:
 		indices[i] = i;
 
 
-	std::vector<double> input(28 * 28);
-	std::vector<double> sol(101);
+	Vector input(28 * 28);
+	Vector sol(101);
 
 	int it = 0;
 	val_error_sum = validation_examples;
@@ -2051,7 +2161,7 @@ bool RNN_caltech101_sil_problem(RNN& rnn, int exampl, int iters, bool test, std:
 
 
 
-void RNN_chess_problem(RNN& rnn, int exampl, int iters, std::vector<std::vector<double>> &inp, std::vector<double> &sol_list)
+void RNN_chess_problem(RNN& rnn, int exampl, int iters, Matrix &inp, Vector &sol_list)
 {
 	double error_sum = 0;
 	int ini_nodes = rnn.ini;
@@ -2065,8 +2175,8 @@ void RNN_chess_problem(RNN& rnn, int exampl, int iters, std::vector<std::vector<
 	if (examples == -1)
 		examples = inp.size();
 
-	std::vector<double> input(rnn.ini);
-	std::vector<double> sol(rnn.out);
+	Vector input(rnn.ini);
+	Vector sol(rnn.out);
 
 	for (int it = 0; it < iters; it++) {
 		std::random_shuffle(indices.begin(), indices.end());
@@ -2109,9 +2219,15 @@ void RNN_chess_problem(RNN& rnn, int exampl, int iters, std::vector<std::vector<
 
 
 
-bool generic_classif_RNN_problem(RNN& rnn, int exampl, int iters, bool test,
-	std::vector < std::pair<std::vector<double>, double> >& dataset, std::vector < std::pair<std::vector<double>, double> >& test_data,
-	std::vector < std::pair<std::vector<double>, double> >& val_data) {
+bool generic_classif_RNN_problem(
+	RNN& rnn, 
+	int exampl, 
+	int iters, 
+	bool test,
+	std::vector < std::pair<Vector, double> >& dataset, 
+	std::vector < std::pair<Vector, double> >& test_data,
+	std::vector < std::pair<Vector, double> >& val_data
+){
 
 	double aux_drop = rnn.inp_dropout;
 	rnn.inp_dropout = 0;
@@ -2134,8 +2250,8 @@ bool generic_classif_RNN_problem(RNN& rnn, int exampl, int iters, bool test,
 		indices[i] = i;
 
 
-	std::vector<double> input(rnn.ini);
-	std::vector<double> sol(rnn.out);
+	Vector input(rnn.ini);
+	Vector sol(rnn.out);
 
 	int it = 0;
 	val_error_sum = validation_examples;
@@ -2292,8 +2408,8 @@ bool generic_classif_RNN_problem(RNN& rnn, int exampl, int iters, bool test,
 
 
 bool generic_regress_RNN_problem(RNN& rnn, int exampl, int iters, bool test,
-	std::vector < std::pair<std::vector<double>, double> >& dataset, std::vector < std::pair<std::vector<double>, double> >& test_data,
-	std::vector < std::pair<std::vector<double>, double> >& val_data) {
+	std::vector < std::pair<Vector, double> >& dataset, std::vector < std::pair<Vector, double> >& test_data,
+	std::vector < std::pair<Vector, double> >& val_data) {
 
 	double aux_drop = rnn.inp_dropout;
 	rnn.inp_dropout = 0;
@@ -2316,8 +2432,8 @@ bool generic_regress_RNN_problem(RNN& rnn, int exampl, int iters, bool test,
 		indices[i] = i;
 
 
-	std::vector<double> input(rnn.ini);
-	std::vector<double> sol(rnn.out);
+	Vector input(rnn.ini);
+	Vector sol(rnn.out);
 
 	int it = 0;
 	val_error_sum = INFINITY;

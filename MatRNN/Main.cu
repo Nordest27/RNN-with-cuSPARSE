@@ -1,8 +1,8 @@
 #include "Chess.cuh"
 #include "sqlite3.h"
 
-std::vector<std::vector<double>> inp;
-std::vector<double> res;
+std::vector<Vector> inp;
+Vector res;
 
 static int callback(void* data, int argc, char** argv, char** azColName) {
     int i;
@@ -68,9 +68,9 @@ int main()
     mat.cooColInd = { 0, 2, 3, 1, 0, 2, 3, 1, 3, 9 };
     mat.cooValues = { 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f };
 
-    std::vector<double> hX = { 1.0f, 2.0f, 3.0f, 4.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 10.0f };
-    std::vector<double> hY = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
-    std::vector<double> hY_result = { 19.0f, 8.0f, 51.0f, 52.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+    Vector hX = { 1.0f, 2.0f, 3.0f, 4.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 10.0f };
+    Vector hY = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+    Vector hY_result = { 19.0f, 8.0f, 51.0f, 52.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
 
     smpv(mat, hX, hY); 
     mat_vect_mul(mat, hX, hY_result);
@@ -83,8 +83,10 @@ int main()
     cudaGetDeviceProperties(&properties, 0);
     std::cout << "using " << properties.multiProcessorCount << " multiprocessors" << std::endl;
     std::cout << "max threads per processor: " << properties.maxThreadsPerMultiProcessor << std::endl;
-
-    prune_caltech_problem();
+    //RNN_mnist_autoencode_problem();
+    prune_mnist_problem();
+    //prune_caltech_problem();
+    //chess_problem();
     //test_fen();
     //std::ifstream stream("train_caltech101.txt");
 

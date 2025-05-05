@@ -1,9 +1,9 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 16
-VisualStudioVersion = 16.0.30413.136
+# Visual Studio Version 17
+VisualStudioVersion = 17.8.34330.188
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "MatRNN", "MatRNN\MatRNN.vcxproj", "{411BA0E9-33EC-49C2-A7F0-03691AA7A2BC}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "MatRNN", "MatRNN.vcxproj", "{6D07A5E7-F72E-4FEE-AAE1-7EBFC2359C41}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -11,15 +11,15 @@ Global
 		Release|x64 = Release|x64
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{411BA0E9-33EC-49C2-A7F0-03691AA7A2BC}.Debug|x64.ActiveCfg = Debug|x64
-		{411BA0E9-33EC-49C2-A7F0-03691AA7A2BC}.Debug|x64.Build.0 = Debug|x64
-		{411BA0E9-33EC-49C2-A7F0-03691AA7A2BC}.Release|x64.ActiveCfg = Release|x64
-		{411BA0E9-33EC-49C2-A7F0-03691AA7A2BC}.Release|x64.Build.0 = Release|x64
+		{6D07A5E7-F72E-4FEE-AAE1-7EBFC2359C41}.Debug|x64.ActiveCfg = Debug|x64
+		{6D07A5E7-F72E-4FEE-AAE1-7EBFC2359C41}.Debug|x64.Build.0 = Debug|x64
+		{6D07A5E7-F72E-4FEE-AAE1-7EBFC2359C41}.Release|x64.ActiveCfg = Release|x64
+		{6D07A5E7-F72E-4FEE-AAE1-7EBFC2359C41}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
-		SolutionGuid = {5E8C756C-74CD-461B-B2A0-47C31AD49F1B}
+		SolutionGuid = {9DA67A02-C70D-4F5D-B4EC-3B8B198454A6}
 	EndGlobalSection
 EndGlobal

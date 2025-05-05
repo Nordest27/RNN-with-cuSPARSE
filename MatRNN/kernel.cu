@@ -38,7 +38,6 @@ __global__ void addWithAdamKernel(double* values, double alpha, double* m_corr,
 }
 
 
-
 __global__ void multKernel(double* a, double c, double* b, int size)
 {
     // Get our global thread ID
@@ -94,23 +93,43 @@ __global__ void useActKernel(double* values, double* dx, int* act_f, int size, i
     }
     int aux_act_f = act_f[id];
     dx[id] = 0;
-    //RELU 0, SIGMOID 1, LINEAL 2
-    if (aux_act_f == 1) {
+    switch (aux_act_f) {
+    case SIGMOID:
         values[id] = 1 / (1 + exp(-values[id]));
         dx[id] = values[id] * (1 - values[id]);
-    }
-    else if (aux_act_f == 0) {
+        break;
+    case RELU:
         if (values[id] <= 0) {
             values[id] = 0;
             dx[id] = 0;
         }
         else dx[id] = 1;
+        break;
+    case LINEAL:
+        dx[id] = 1;
+    case LEAKY_RELU:
+        if (values[id] <= 0) {
+            values[id] = 0.01 * values[id];
+            dx[id] = 0.01;
+        }
+        else dx[id] = 1;
+        break;
+    case TANH:
+        values[id] = tanh(values[id]);
+        dx[id] = 1 - values[id] * values[id];
+        break;
     }
-    else if (aux_act_f == 2) dx[id] = 1;
-
 }
 
-__global__ void TmultVectsKernel(double* values, int* cooRow, int* cooCol, double* a, double c, double* b, int size)
+__global__ void TmultVectsKernel(
+    double* values, 
+    int* cooRow, 
+    int* cooCol, 
+    double* a, 
+    double c, 
+    double* b, 
+    int size
+)
 {
     // Get our global thread ID
     int id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -130,7 +149,7 @@ COO_matrix::COO_matrix()
     nnz = 0;
     cooRowInd = std::vector<int>();
     cooColInd = std::vector<int>();
-    cooValues = std::vector<double>();
+    cooValues = Vector();
 }
 
 void COO_matrix::connect_layers(int ini1, int end1, int ini2, int end2, double sparsity, int nodes)
@@ -167,14 +186,15 @@ void COO_matrix::connect_layers(int ini1, int end1, int ini2, int end2, double s
 
     std::vector<int> row_aux;
     std::vector<int> col_aux;
-    std::vector<double> values;
+    Vector values;
     std::vector<bool> seen(rows * cols, false);
     int ini_cols = cols;
     int ini_rows = rows;
     for (int i = 0; i < cooValues.size(); ++i)
         seen[cooRowInd[i] * ini_cols + cooColInd[i]] = true;
 
-    std::cout << ini2 << " " << end2 << " " << ini1 << " " << end1<< std::endl;
+    
+    std::cout <<"From " << ini2 << "-" << end2 << "  to " << ini1 << "-" << end1 << std::endl;
    /* for (int i = 0; i < nnz; ++i)
     {
         std::cout << i << " " << cooRowInd[i] << " " << cooColInd[i] << std::endl;
@@ -309,7 +329,7 @@ COO_matrix::~COO_matrix() {
 }
 //////////////
 
-void mat_vect_mul(COO_matrix& mat, std::vector<double>& vect, std::vector<double>& result) {
+void mat_vect_mul(COO_matrix& mat, Vector& vect, Vector& result) {
     for (int i = 0; i < mat.rows; ++i)
     {
         result[i] = 0;
@@ -332,7 +352,7 @@ int sign(double val)
     return (int(0) < val) - (val < int(0));
 }
 
-int max_pos(int ini, int end, const std::vector<double> &values)
+int max_pos(int ini, int end, const Vector &values)
 {
     int maxi = ini;
     for(int i = ini; i < end; ++i)
@@ -341,7 +361,7 @@ int max_pos(int ini, int end, const std::vector<double> &values)
     return maxi;
 }
 
-double sum(const std::vector<double> &v)
+double sum(const Vector &v)
 {
     double sum = 0;
     for (double val : v)
@@ -351,7 +371,7 @@ double sum(const std::vector<double> &v)
 
 
 // multiply sparse matrix and dense vector
-void smpv( COO_matrix &mat, std::vector<double> &vect, std::vector<double> &result)
+void smpv( COO_matrix &mat, Vector &vect, Vector &result)
 {
     //--------------------------------------------------------------------------
     // Device memory management
@@ -413,92 +433,11 @@ void smpv( COO_matrix &mat, std::vector<double> &vect, std::vector<double> &resu
     cusparseDestroy(handle);
     //--------------------------------------------------------------------------
     //get result
-    cudaMemcpy(result.data(), dY, mat.rows * sizeof(double),
-        cudaMemcpyDeviceToHost);
+    cudaMemcpy(result.data(), dY, mat.rows * sizeof(double), cudaMemcpyDeviceToHost);
     cudaFree(dBuffer);
     cudaFree(dA_rows);
     cudaFree(dA_columns);
     cudaFree(dA_values);
     cudaFree(dX);
     cudaFree(dY);
-}
-
-// Helper function for using CUDA to add vectors in parallel.
-cudaError_t addWithCuda(int *c, const int *a, const int *b, unsigned int size)
-{
-    double *dev_a = 0;
-    double *dev_b = 0;
-    double *dev_c = 0;
-    cudaError_t cudaStatus;
-
-    // Choose which GPU to run on, change this on a multi-GPU system.
-    cudaStatus = cudaSetDevice(0);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
-        goto Error;
-    }
-
-    // Allocate GPU buffers for three vectors (two input, one output)    .
-    cudaStatus = cudaMalloc((void**)&dev_c, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
-
-    cudaStatus = cudaMalloc((void**)&dev_a, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
-
-    cudaStatus = cudaMalloc((void**)&dev_b, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
-
-    // Copy input vectors from host memory to GPU buffers.
-    cudaStatus = cudaMemcpy(dev_a, a, size * sizeof(int), cudaMemcpyHostToDevice);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
-
-    cudaStatus = cudaMemcpy(dev_b, b, size * sizeof(int), cudaMemcpyHostToDevice);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
-
-    // Launch a kernel on the GPU with one thread for each element.
-    addKernel<<<1, size>>>(dev_a, 1, dev_b, size);
-
-    // Check for any errors launching the kernel
-    cudaStatus = cudaGetLastError();
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "addKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
-        goto Error;
-    }
-    
-    // cudaDeviceSynchronize waits for the kernel to finish, and returns
-    // any errors encountered during the launch.
-    cudaStatus = cudaDeviceSynchronize();
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching addKernel!\n", cudaStatus);
-        goto Error;
-    }
-
-    // Copy output vector from GPU buffer to host memory.
-    cudaStatus = cudaMemcpy(c, dev_c, size * sizeof(int), cudaMemcpyDeviceToHost);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
-
-Error:
-    cudaFree(dev_c);
-    cudaFree(dev_a);
-    cudaFree(dev_b);
-    
-    return cudaStatus;
 }

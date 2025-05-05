@@ -22,7 +22,7 @@ Prune_evolver::Prune_evolver(int i_nod, int o_nod, int nod, int m_i, int m_d, in
 
 	act_f = a_f;
 	how_many_active_w = 0;
-	biases = std::vector<double>(nodes, 0);
+	biases = Vector(nodes, 0);
 	adam = adamb;
 	updated = false;
 	inp_dropout = inp_drop;
@@ -100,16 +100,16 @@ void Prune_evolver::connect_to_all(int i)
 	}
 }
 
-void Prune_evolver::forward_prop(std::vector<double>& input_values) {
-
+void Prune_evolver::forward_prop(Vector& input_values) {
+	rnn.set_input_values(input_values);
 	for (int i = 0; i < max_iters; ++i)
 	{
-		rnn.set_input_values(input_values);
+		rnn.add_input_values(input_values.size());
 		rnn.forward_prop();
 	}
 }
 
-double Prune_evolver::evaluate(std::vector<double>& correct_values, bool classif)
+double Prune_evolver::evaluate(Vector& correct_values, bool classif)
 {
 	double error = rnn.backward_prop(correct_values, classif);
 	eval += error;
@@ -119,7 +119,7 @@ double Prune_evolver::evaluate(std::vector<double>& correct_values, bool classif
 void Prune_evolver::prune_weights(int how_many)
 {
 	if (how_many == 0) return;
-	std::vector<double> weights_aux = weights.cooValues;
+	Vector weights_aux = weights.cooValues;
 
 	for (int i = 0; i < weights_aux.size(); ++i)
 		weights_aux[i] = abs(weights_aux[i]);
@@ -154,13 +154,13 @@ void Prune_evolver::prune_weights(double threshold)
 	//ini_weights.resize(last);
 }
 
-double Prune_evolver::prune_weights(int how_many, std::vector<double> &scores)
+double Prune_evolver::prune_weights(int how_many, Vector &scores)
 {
 	if (how_many == 0) return 0;
 
 	double suma = sum(scores);
 
-	std::vector<double> scores_aux = scores;
+	Vector scores_aux = scores;
 
 	std::sort(scores_aux.begin(), scores_aux.end());
 	//for (auto val : scores_aux)
@@ -181,7 +181,7 @@ double Prune_evolver::prune_weights(int how_many, std::vector<double> &scores)
 	return suma;
 }
 
-void Prune_evolver::prune_weights(double threshold, std::vector<double>& scores)
+void Prune_evolver::prune_weights(double threshold, Vector& scores)
 {
 	
 	int last = 0;
@@ -235,8 +235,11 @@ void Prune_evolver::fully_connect_n_nodes(int n)
 	}
 }
 
-void Prune_evolver::connect_everything( double sparsity, bool to_inp, bool from_out )
-{
+void Prune_evolver::connect_everything( 
+	double sparsity, 
+	bool to_inp, 
+	bool from_out
+){
 	if(to_inp && from_out)
 		weights.connect_layers(0, nodes, 0, nodes, sparsity, nodes);
 	else if(!to_inp && from_out)
@@ -246,6 +249,7 @@ void Prune_evolver::connect_everything( double sparsity, bool to_inp, bool from_
 		weights.connect_layers(ini + out, nodes, 0, nodes, sparsity, nodes);
 	}
 	else {
+		std::cout<<"Here!"<<std::endl;
 		weights.connect_layers(        0,   ini, ini, nodes, sparsity, nodes);
 		weights.connect_layers(ini + out, nodes, ini, nodes, sparsity, nodes);
 	}
@@ -294,7 +298,7 @@ void Prune_evolver::add_n_random_connections_weight_strat(int n)
 
 void Prune_evolver::connect_like_mlp(std::vector<int>& hid_layers, bool b)
 {
-	std::vector<double> offset(hid_layers.size(), 0);
+	Vector offset(hid_layers.size(), 0);
 
 	for (int i = 1; i < hid_layers.size(); ++i) {
 		offset[i] += hid_layers[i - 1] + offset[i - 1];
@@ -373,7 +377,7 @@ void Prune_evolver::divide_weights_and_biases(double d)
 		biases[i] /= d;
 }
 
-double Prune_evolver::synflow_prune(int how_many, bool classif, std::vector<double> &ones)
+double Prune_evolver::synflow_prune(int how_many, bool classif, Vector &ones)
 {
 	auto scores = rnn.synflow_cycle(classif, ones, -1);
 
@@ -381,17 +385,17 @@ double Prune_evolver::synflow_prune(int how_many, bool classif, std::vector<doub
 }
 
 
-double Prune_evolver::synflow_prune(int how_many, bool classif, std::vector<std::pair<std::vector<double>, double>>& dataset, int samples)
+double Prune_evolver::synflow_prune(int how_many, bool classif, std::vector<std::pair<Vector, double>>& dataset, int samples)
 {
 	auto scores = rnn.synflow_cycle(classif, dataset, samples);
 
 	return prune_weights(how_many, scores);
-	/*std::vector<double> scores(weights.nnz);
+	/*Vector scores(weights.nnz);
 	int ant_res = -1;
 	for (int i = 0; i < out; ++i) {
 
 		int example;
-		std::vector<double> inp(ini, 0);
+		Vector inp(ini, 0);
 
 		for (int j = 0; j < samples; ++j)
 		{
@@ -436,14 +440,14 @@ double Prune_evolver::synflow_prune(int how_many, bool classif, std::vector<std:
 	return prune_weights(how_many, scores);*/
 }
 
-void Prune_evolver::synflow_loop(int iters, double new_conn_thresh, int max_conn, bool to_inp, bool from_out, std::vector<double> &ones, bool classif)
+void Prune_evolver::synflow_loop(int iters, double new_conn_thresh, int max_conn, bool to_inp, bool from_out, Vector &ones, bool classif)
 {
 	double suma = 0;
 	for (int i = 0; i < iters; i++) {
 
 		connect_everything(new_conn_thresh, to_inp, from_out);
 	    //std::vector<int> hid_layers = { 1000, 500, 300 };
-       // connect_like_mlp(hid_layers, true);
+        // connect_like_mlp(hid_layers, true);
 		//connect_input_output();
 		update_rnn();
 
@@ -504,8 +508,16 @@ void Prune_evolver::synflow_loop(int iters, double new_conn_thresh, int max_conn
 	}
 }
 
-void Prune_evolver::synflow_loop(int iters, double new_conn_thresh, int max_conn, bool to_inp, bool from_out, bool classif, std::vector<std::pair<std::vector<double>, double>>& dataset, int samples)
-{
+void Prune_evolver::synflow_loop(
+	int iters, 
+	double new_conn_thresh, 
+	int max_conn, 
+	bool to_inp, 
+	bool from_out, 
+	bool classif, 
+	std::vector<std::pair<Vector, double>>& dataset, 
+	int samples
+){
 	double suma = 0;
 	for (int i = 0; i < iters; i++) {
 
@@ -601,7 +613,7 @@ void prune_test()
 	std::cout << "Number of Weights: " << pe.rnn.weights.nnz << std::endl;
 	int max_connections = 200;
 
-	std::vector<double> ones(pe.ini, 1);
+	Vector ones(pe.ini, 1);
 
 	pe.synflow_loop(10, 0, max_connections, false, false, ones, true);
 	
@@ -666,24 +678,24 @@ void prune_mnist_problem()
 	cusparseCreate(&handle);
 	int ini_nodes = 28 * 28;
 	int out_nodes = 10;
-	int extra_nodes = 500;
+	int extra_nodes = 100;
 	int nodes = ini_nodes + out_nodes + extra_nodes;
-	int batch = 1;
-	int depth = 5;
+	int batch = 32;
+	int depth = 4;
 	int delay_iteration = 0;
-	double learning_rate = 0.0001;
+	double learning_rate = 0.01;
 	double error_sum = 0;
 	bool adam = true;
 
 	double inp_dropout = 0;
-	std::vector<activation_function> act_f(nodes, RELU);
+	std::vector<activation_function> act_f(nodes, LEAKY_RELU);
 
 	for (int i = ini_nodes; i < ini_nodes + out_nodes; ++i)
 		act_f[i] = LINEAL;
 
 
 	for (int i = ini_nodes + out_nodes; i < nodes; ++i)
-		act_f[i] = RELU;
+		act_f[i] = LEAKY_RELU;
 
 	Prune_evolver pe(ini_nodes, out_nodes, nodes, depth, depth, delay_iteration, batch, learning_rate, learning_rate, act_f, adam, inp_dropout, handle);
 	//pe.connect_input_output();
@@ -692,9 +704,9 @@ void prune_mnist_problem()
 	//pe.update_rnn();
 
 	std::cout << "Number of Weights: " << pe.rnn.weights.nnz << std::endl;
-	int max_connections = 10000;
+	int max_connections = 100000;
 
-	std::vector<double> ones(pe.ini, 0);
+	Vector ones(pe.ini, 0);
 
 	auto inp = mnist::read_training_images();
 	auto sol_list = mnist::read_training_labels();
@@ -705,9 +717,9 @@ void prune_mnist_problem()
 	auto test_sol_list = mnist::read_test_labels();
 	sol_list.insert(sol_list.end(), test_sol_list.begin(), test_sol_list.end());
 
-	std::vector < std::pair<std::vector<double>, double> > dataset;
-	std::vector < std::pair<std::vector<double>, double> > test_data;
-	std::vector < std::pair<std::vector<double>, double> > val_data;
+	std::vector < std::pair<Vector, double> > dataset;
+	std::vector < std::pair<Vector, double> > test_data;
+	std::vector < std::pair<Vector, double> > val_data;
 
 	pe.rnn.partition(inp, sol_list, 0.71428571428, 0.5, dataset, test_data, val_data, 255, true);
 	//pe.rnn.partition(inp, sol_list, 0.8, 0.75, dataset, test_data, val_data, 255);
@@ -753,11 +765,12 @@ void prune_mnist_problem()
 	//pe.connect_everything(0, true, true);
 	//pe.prune_weights(pe.weights.nnz - max_connections);
 	//std::cout << "Number of Weights: " << pe.weights.nnz << std::endl;
-	//ones = std::vector<double>(pe.ini, 1);
-	//pe.synflow_loop(20, 0, max_connections, true, true, ones, true);
-    pe.synflow_loop(20, 0, max_connections, true, true, true, dataset, 100);
+	//ones = Vector(pe.ini, 1);
+	//pe.synflow_loop(5, 0, max_connections, false, false, ones, true);
+    //pe.synflow_loop(5, 0, max_connections, false, false, true, dataset, 100);
 	//pe.synflow_loop(50, 0, max_connections, false, false, true, dataset, 100);
-	//pe.add_n_random_connections(max_connections);
+	pe.connect_everything(0.15, false, true);
+	pe.update_rnn();
 
 	pe.inp_dropout = 0;
 	pe.update_rnn();
@@ -769,7 +782,7 @@ void prune_mnist_problem()
 
 std::vector<std::vector<int>> read_caltech_training_images()
 {
-	std::ifstream stream("train_caltech101.txt");
+	std::ifstream stream("MatRNN/train_caltech101.txt");
 	std::vector<std::vector<int>> result;
 	int n;
 	stream >> n;
@@ -790,7 +803,7 @@ std::vector<std::vector<int>> read_caltech_training_images()
 
 std::vector<int> read_caltech_training_labels()
 {
-	std::ifstream stream("train_labels_caltech101.txt");
+	std::ifstream stream("MatRNN/train_labels_caltech101.txt");
 
 	int n;
 	stream >> n;
@@ -805,7 +818,7 @@ std::vector<int> read_caltech_training_labels()
 
 std::vector<std::vector<int>> read_caltech_test_images()
 {
-	std::ifstream stream("test_caltech101.txt");
+	std::ifstream stream("MatRNN/test_caltech101.txt");
 	std::vector<std::vector<int>> result;
 	int n;
 	stream >> n;
@@ -826,7 +839,7 @@ std::vector<std::vector<int>> read_caltech_test_images()
 
 std::vector<int> read_caltech_test_labels()
 {
-	std::ifstream stream("test_labels_caltech101.txt");
+	std::ifstream stream("MatRNN/test_labels_caltech101.txt");
 
 	int n;
 	stream >> n;
@@ -872,31 +885,32 @@ void prune_caltech_problem()
 	cusparseCreate(&handle);
 	int ini_nodes = 28 * 28;
 	int out_nodes = 101;
-	int extra_nodes = 500;
+	int extra_nodes = 1000;
 	int nodes = ini_nodes + out_nodes + extra_nodes;
-	int batch = 10;
-	int depth = 20;
+	int batch = 32;
+	int depth = 4;
 	int delay_iteration = 0;
-	double learning_rate = 0.01;
+	double learning_rate = 0.001;
 	double error_sum = 0;
 	bool adam = true;
 
 	double inp_dropout = 0;
 
-	std::vector<activation_function> act_f(nodes, RELU);
-
-	Prune_evolver pe(ini_nodes, out_nodes, nodes, depth, depth, delay_iteration, batch, learning_rate, learning_rate, act_f, adam, inp_dropout, handle);
+	std::vector<activation_function> act_f(nodes, LEAKY_RELU);
 
 	for (int i = ini_nodes; i < ini_nodes + out_nodes; ++i)
-		pe.act_f[i] = LINEAL;
+		act_f[i] = LINEAL;
 
 
 	for (int i = ini_nodes + out_nodes; i < nodes; ++i)
-		pe.act_f[i] = RELU;
+		act_f[i] = LEAKY_RELU;
 
-	std::vector < std::pair<std::vector<double>, double> > dataset;
-	std::vector < std::pair<std::vector<double>, double> > test_data;
-	std::vector < std::pair<std::vector<double>, double> > val_data;
+	Prune_evolver pe(ini_nodes, out_nodes, nodes, depth, depth, delay_iteration, batch, learning_rate, learning_rate, act_f, adam, inp_dropout, handle);
+
+
+	std::vector < std::pair<Vector, double> > dataset;
+	std::vector < std::pair<Vector, double> > test_data;
+	std::vector < std::pair<Vector, double> > val_data;
 
 	for (int i = 0; i < sol_list.size(); ++i)
 		sol_list[i]--;
@@ -907,7 +921,7 @@ void prune_caltech_problem()
 	std::cout << "Valid size: " << val_data.size() << std::endl;
 	std::cout << "Test  size: " << test_data.size() << std::endl;
 
-	std::vector<double> ones(pe.ini, 0);
+	Vector ones(pe.ini, 0);
 	double suma = 0;
 	for (int i = 0; i < dataset.size(); ++i)
 		for (int j = 0; j < dataset[i].first.size(); j++)
@@ -948,27 +962,28 @@ void prune_caltech_problem()
 		std::cout << std::endl;
 	}
 	std::cout << std::endl;
-	int max_connections = 100000;
-	pe.connect_everything(0, true, true);
-	std::vector<double> randCrit(pe.weights.nnz);
+	int max_connections = 1000000;
+	Vector randCrit(pe.weights.nnz);
 	for (int i = 0; i < pe.weights.nnz; ++i)
 		randCrit[i] = randomdouble();
 
-	pe.prune_weights(pe.weights.nnz - max_connections, randCrit);
-	pe.update_rnn();
+	//pe.prune_weights(pe.weights.nnz - max_connections, randCrit);
+	//pe.update_rnn();
     //pe.connect_input_output();
 	//std::vector<int> hid_layers = { 1000, 200, 100 };
 	//pe.connect_like_mlp(hid_layers, true);
 	//pe.update_rnn();
 	//pe.add_n_random_connections(max_connections);
-	//ones = std::vector<double>(pe.ini, 1);
-	//pe.synflow_loop(20, 0, max_connections, true, true, ones, true);
+	//ones = Vector(pe.ini, 1);
+	//pe.synflow_loop(10, 0, max_connections, false, true, ones, true);
     //pe.synflow_loop(20, 0, max_connections, true, true, true, dataset, 1);
 	//pe.add_n_random_connections(max_connections);
+	pe.connect_everything(0.75, false, true);
+	pe.update_rnn();
 
 	std::cout << "Number of Weights: " << pe.rnn.weights.nnz << std::endl;
-	pe.inp_dropout = 0;
-	pe.update_rnn();
+	//pe.inp_dropout = 0;
+	
 	//pe.rnn.print_matrix();
 	generic_classif_RNN_problem(pe.rnn, -1, 100, true, dataset, test_data, val_data);
 	std::cout << "Number of Weights: " << pe.rnn.weights.nnz << std::endl;
@@ -977,7 +992,7 @@ void prune_caltech_problem()
 
 
 
-void prune_chess_problem(std::vector<std::vector<double>>& inp, std::vector<double>& sol_list)
+void prune_chess_problem(std::vector<Vector>& inp, Vector& sol_list)
 {
 	cusparseHandle_t handle;
 	cusparseCreate(&handle);
@@ -1011,13 +1026,13 @@ void prune_chess_problem(std::vector<std::vector<double>>& inp, std::vector<doub
 	//pe.connect_input_output();
 	pe.update_rnn();
 
-	std::vector < std::pair<std::vector<double>, double> > dataset;
-	std::vector < std::pair<std::vector<double>, double> > test_data;
-	std::vector < std::pair<std::vector<double>, double> > val_data;
+	std::vector < std::pair<Vector, double> > dataset;
+	std::vector < std::pair<Vector, double> > test_data;
+	std::vector < std::pair<Vector, double> > val_data;
 
 	pe.rnn.partition(inp, sol_list, 0.9, 0.5, dataset, test_data, val_data, 1, true);
 
-	auto ones = std::vector<double>(pe.ini, 0);
+	auto ones = Vector(pe.ini, 0);
 	double suma = 0;
 
 	for (int i = 0; i < dataset.size(); ++i)
@@ -1043,7 +1058,7 @@ void prune_chess_problem(std::vector<std::vector<double>>& inp, std::vector<doub
 	//pe.connect_everything(0, true, true);
 	//pe.prune_weights(pe.weights.nnz - max_connections);
 	//std::cout << "Number of Weights: " << pe.weights.nnz << std::endl;
-	//ones = std::vector<double>(pe.ini, 1);
+	//ones = Vector(pe.ini, 1);
 	//pe.synflow_loop(20, 0, max_connections, true, true, ones, true);
 	
 

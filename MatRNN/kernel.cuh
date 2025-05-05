@@ -8,15 +8,22 @@
 #include <random>
 #include <queue>
 #include <fstream>
-#include "../../MNIST_reader/include/mnist/mnist_reader_less.hpp"
+#include "../MNIST_reader/include/mnist/mnist_reader_less.hpp"
+
+enum activation_function {
+    RELU, SIGMOID, LINEAL, SOFTMAX, LEAKY_RELU, TANH
+};
+
+typedef std::vector<double> Vector;
+typedef std::vector<Vector> Matrix;
 
 double randomdouble();
 
 int sign(double val);
 
-int max_pos(int ini, int end, const std::vector<double> &values);
+int max_pos(int ini, int end, const Vector &values);
 
-double sum(const std::vector<double> &v);
+double sum(const Vector &v);
 
 struct COO_matrix
 {
@@ -26,7 +33,7 @@ struct COO_matrix
 
     std::vector<int> cooRowInd;
     std::vector<int> cooColInd;
-    std::vector<double> cooValues;
+    Vector cooValues;
 
     COO_matrix();
 
@@ -36,7 +43,7 @@ struct COO_matrix
     ~COO_matrix();
 };
 
-void mat_vect_mul(COO_matrix& mat, std::vector<double>& vect, std::vector<double>& result);
+void mat_vect_mul(COO_matrix& mat, Vector& vect, Vector& result);
 
 __global__ void addKernel(double* a, double c, double* b, int size);
 __global__ void multKernel(double* a, double c, double* b, int size);
@@ -47,6 +54,5 @@ __global__ void TmultVectsKernel(double* values, int* cooRow, int* cooCol, doubl
 __global__ void useActKernel(double* values, double* dx, int* act_f, int size, int* mask);
 __global__ void updateAdamKernel(double beta1, double beta2, double* m, double* v, double* m_corr, double* v_corr, double* g, int size, double powBeta1, double powBeta2);
 __global__ void addWithAdamKernel(double* values, double alpha, double* m_corr, double* v_corr, double eps, int size);
-void smpv(COO_matrix &mat, std::vector<double> &vect, std::vector<double> &result);
 
-cudaError_t addWithCuda(int* c, const int* a, const int* b, unsigned int size);
+void smpv(COO_matrix &mat, Vector &vect, Vector &result);
